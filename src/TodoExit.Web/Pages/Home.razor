@@ -34,7 +34,7 @@
     <ul class="plain">
         <li>The app asks Microsoft for read-only access to your tasks (the Tasks.Read permission). It cannot change or delete anything.</li>
         <li>It runs entirely in your browser. There is no todo-exit server.</li>
-        <li>Your browser talks to Microsoft only: its sign-in service to sign you in, and Microsoft Graph to read your tasks. Your tasks are sent to no other server.</li>
+        <li>Your browser talks to Microsoft only: its sign-in service to sign you in, and Microsoft Graph to read your tasks. Your tasks are sent to no other server, unless you choose to send them to Todoist in step 5. Then your browser also sends them to the Todoist API, with the API token you paste there.</li>
         <li>Your sign-in stays in this browser tab and is gone when you sign out or close the tab. Sign out also signs your Microsoft account out of this browser and leaves you on Microsoft's page.</li>
         <li>The files are built on your device and saved by your browser.</li>
         <li>The source code is open: <a href="@AppSettings.RepositoryUrl">@AppSettings.RepositoryUrl</a>.</li>
@@ -236,6 +236,8 @@
             }
         }
     </section>
+
+    <SendToTodoist Document="_document!" Archive="_archive" IsSample="_isSample" BusyChanged="b => _todoistBusy = b" />
 }
 
 @code {
@@ -266,7 +268,11 @@
     private bool _csv = true;
     private bool _includeCompleted;
 
-    private bool Busy => _state == State.Reading;
+    private bool Busy => _state == State.Reading || _todoistBusy;
+
+    /// <summary>Step 5 is reading the Todoist account or transferring; the archive must not change under it.</summary>
+    private bool _todoistBusy;
+    private bool _isSample;
 
     private ExportFormats SelectedFormats =>
         (_json ? ExportFormats.Json : 0) | (_markdown ? ExportFormats.Markdown : 0)
@@ -333,6 +339,7 @@
             });
             var document = await reader.ReadAsync(progress, _cts.Token);
             _hasRead = true;
+            _isSample = false;
             SetArchive(document, "Read from your Microsoft account just now.");
         }
         catch (GraphReadInterruptedException ex)
@@ -357,7 +364,9 @@
         try
         {
             var bytes = await AppHttp.GetByteArrayAsync("sample/sample-archive.json");
-            SetArchive(TodoArchiveDocument.Parse(bytes), "Showing sample data for a fictional account. None of it is yours.");
+            var document = TodoArchiveDocument.Parse(bytes);
+            _isSample = true;
+            SetArchive(document, "Showing sample data for a fictional account. None of it is yours.");
         }
         catch (Exception ex) when (ex is HttpRequestException or InvalidDataException)
         {

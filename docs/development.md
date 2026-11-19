@@ -46,9 +46,11 @@ As of 2026-11-19:
 - Sign out on the hosted web app with a personal account: it signs out, but stays on Microsoft's "You signed out" page even though the logout redirect URI is registered.
 - The Todoist CSV files: three of them (49, 101 and 294 tasks) were imported into a free Todoist account and read back through Todoist's API. Sub-tasks, priorities, labels, descriptions and dates matched.
 - The repeat-rule phrases in `RecurrenceText.cs`: Todoist accepted every phrase the tool can write as a recurring task with the right next date.
+- Transfer through the Todoist API, with the command-line tool on a free Todoist account: a plan against the real account, a real transfer read back and compared with the archive (20 tasks, 81 sub-tasks), refusal on an existing project name and on too few free projects, completed tasks and sub-tasks with past completion dates, and a transfer interrupted while a 100-command request was in flight and then continued. Every item arrived once, also after Todoist had rewritten plain web addresses into titled links.
+- The web app's Todoist step: in headless Chrome against a simulated Todoist API (plan, transfer, cancel and continue, rejected token, redirect not followed, token found in no storage, page text or downloaded file). Not yet run in a browser against the real Todoist API.
 - The unit tests run on Linux and Windows on every push.
 
-Not tested yet: work and school accounts, browsers that are not based on Chromium, and `--resume` against the real Graph (it is covered by tests against a fake one).
+Not tested yet: work and school accounts, Todoist reminders on a paid plan, a transfer into more than one free project at once on the real API, browsers that are not based on Chromium, and `--resume` against the real Graph (it is covered by tests against a fake one).
 
 ### Microsoft Graph behavior observed
 

@@ -39,7 +39,7 @@ internal sealed class FakeTodoist : HttpMessageHandler
 
         public string? ParentId { get; init; }
 
-        public required string Content { get; init; }
+        public required string Content { get; set; }
 
         public string? Description { get; init; }
 
@@ -100,6 +100,13 @@ internal sealed class FakeTodoist : HttpMessageHandler
 
     /// <summary>Write request numbers (1-based) that time out before anything is executed.</summary>
     public HashSet<int> DropRequest { get; } = new();
+
+    /// <summary>
+    /// When set, a read of the tasks first rewrites each bare address in their content into a titled Markdown link,
+    /// for good, as Todoist does some time after a task is created: "https://www.learndash.com/" becomes
+    /// "[Page title of www.learndash.com](https://www.learndash.com/)".
+    /// </summary>
+    public bool RewriteBareUrls { get; set; }
 
     /// <summary>When set, every request answers with a redirect to this address.</summary>
     public string? RedirectTo { get; set; }
@@ -358,6 +365,14 @@ internal sealed class FakeTodoist : HttpMessageHandler
 
         if (types.Contains("items"))
         {
+            if (RewriteBareUrls)
+            {
+                foreach (var item in Items)
+                {
+                    item.Content = RewriteUrls(item.Content);
+                }
+            }
+
             root["items"] = new JsonArray(Active.Select(i => (JsonNode)new JsonObject
             {
                 ["id"] = i.Id,
@@ -372,6 +387,13 @@ internal sealed class FakeTodoist : HttpMessageHandler
 
         return root;
     }
+
+    private static readonly System.Text.RegularExpressions.Regex BareUrl =
+        new(@"(?<![\(\[])\bhttps?://[^\s\)\]]+", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>Bare addresses become "[Page title of host](address)"; addresses already in a link stay as they are.</summary>
+    internal static string RewriteUrls(string content) =>
+        BareUrl.Replace(content, m => $"[Page title of {new Uri(m.Value).Host} | Sell [things]](" + m.Value + ")");
 
     private string NewId(string prefix) => prefix + (++_nextId).ToString(System.Globalization.CultureInfo.InvariantCulture);
 

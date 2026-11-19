@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Components.WebAssembly.Authentication;
 using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
 using Microsoft.Extensions.Logging;
 using TodoExit.Web;
+using TodoExit.Web.Services;
 
 var builder = WebAssemblyHostBuilder.CreateDefault(args);
 builder.RootComponents.Add<App>("#app");
@@ -34,5 +35,11 @@ builder.Services.AddHttpClient(AppSettings.GraphClientName, client => client.Bas
         .ConfigureHandler(
             authorizedUrls: ["https://graph.microsoft.com"],
             scopes: [AppSettings.GraphScope]));
+
+// Todoist client: a separate client without AuthorizationMessageHandler, so the Microsoft token never reaches Todoist.
+// TodoistClient adds the Todoist token itself, for api.todoist.com only. One request of 100 commands takes 12 to 19 s.
+builder.Services.AddTransient<TodoistFetchHandler>();
+builder.Services.AddHttpClient(AppSettings.TodoistClientName, client => client.Timeout = TimeSpan.FromMinutes(3))
+    .AddHttpMessageHandler<TodoistFetchHandler>();
 
 await builder.Build().RunAsync();

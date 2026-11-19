@@ -318,6 +318,107 @@ public class TodoistTransferTests
         Assert.Empty(second.State.Pending);
     }
 
+    private static JsonObject[] Fillers(int n) =>
+        Enumerable.Range(0, n).Select(i => TestData.Task($"Filler {i}", $$"""{ "id": "f{{i}}" }""")).ToArray();
+
+    [Fact]
+    public async Task Resume_finds_tasks_whose_bare_url_todoist_rewrote_into_a_titled_link()
+    {
+        // Request 1: project_add, 97 fillers, P and Q (both the same bare URL) = 100 commands. Q's sub-task is the
+        // first command of request 2, so it needs Q's id from the recovery.
+        const string Url = "https://www.learndash.com/";
+        var tasks = Fillers(97)
+            .Append(TestData.Task(Url, """{ "id": "p" }"""))
+            .Append(TestData.Task(Url, """{ "id": "q", "checklistItems": [ { "displayName": "q step" } ] }"""))
+            .ToArray();
+        var archive = TestData.Archive((TestData.List("Links"), tasks));
+        var fake = new FakeTodoist();
+        fake.LoseResponse.Add(1);
+        var first = await Transfer(archive, fake, maxAttempts: 1);
+        Assert.Equal(TransferStatus.Interrupted, first.Result.Status);
+
+        // Minutes later: Todoist has rewritten the content, and the user added a task with the same URL to the new project.
+        fake.RewriteBareUrls = true;
+        var project = fake.ProjectNamed("Links");
+        fake.Items.Add(new FakeTodoist.Item { Id = "user-1", ProjectId = project.Id, Content = Url, ChildOrder = 100 });
+
+        var second = await Transfer(archive, fake, state: TodoistTransferState.Parse(first.Saves[^1]));
+
+        Assert.Equal(TransferStatus.Completed, second.Result.Status);
+        Assert.Empty(second.State.Errors);
+        var links = fake.Items.Where(i => i.ProjectId == project.Id && i.ParentId is null && i.Content.Contains(Url, StringComparison.Ordinal))
+            .OrderBy(i => i.ChildOrder).ToList();
+        Assert.Equal(3, links.Count); // P, Q and the user's task: nothing created twice
+        Assert.All(links, i => Assert.StartsWith("[Page title of www.learndash.com | Sell [things]](", i.Content));
+        Assert.Equal(links[0].Id, second.State.Ids["t:p"]);
+        Assert.Equal(links[1].Id, second.State.Ids["t:q"]);
+        var step = Single(fake, "q step");
+        Assert.Equal(links[1].Id, step.ParentId);
+        Assert.DoesNotContain(fake.Items, i => i.ParentId == "user-1");
+        Assert.DoesNotContain("user-1", second.State.Ids.Values);
+        Assert.Equal(97 + 2 + 1 + 1, fake.Items.Count);
+    }
+
+    [Fact]
+    public async Task Resume_tells_sibling_sub_tasks_with_the_same_rewritten_url_apart_by_position()
+    {
+        // Request 1: project_add, 96 fillers, T, s0 (checked) and s1, both with the same URL = 100 commands.
+        // Request 2 starts with item_complete for s0, which must reach the first sibling and not the second.
+        const string Url = "https://same.example/page";
+        var tasks = Fillers(96)
+            .Append(TestData.Task("https://parent.example/", $$"""
+                { "id": "t", "checklistItems": [
+                    { "displayName": "{{Url}}", "isChecked": true, "checkedDateTime": "2026-11-15T09:30:00Z" },
+                    { "displayName": "{{Url}}", "isChecked": false } ] }
+                """))
+            .ToArray();
+        var archive = TestData.Archive((TestData.List("Steps"), tasks));
+        var fake = new FakeTodoist();
+        fake.LoseResponse.Add(1);
+        var first = await Transfer(archive, fake, includeCompleted: true, maxAttempts: 1);
+        Assert.Equal(TransferStatus.Interrupted, first.Result.Status);
+        Assert.DoesNotContain(fake.Items, i => i.Checked);
+
+        fake.RewriteBareUrls = true;
+        var second = await Transfer(archive, fake, state: TodoistTransferState.Parse(first.Saves[^1]));
+
+        Assert.Equal(TransferStatus.Completed, second.Result.Status);
+        Assert.Empty(second.State.Errors);
+        var parent = Assert.Single(fake.Items, i => i.Content.Contains("https://parent.example/", StringComparison.Ordinal));
+        Assert.StartsWith("[Page title of parent.example", parent.Content);
+        Assert.Equal(parent.Id, second.State.Ids["t:t"]);
+        var steps = fake.Items.Where(i => i.ParentId == parent.Id).OrderBy(i => i.ChildOrder).ToList();
+        Assert.Equal(2, steps.Count);
+        Assert.All(steps, i => Assert.EndsWith($"]({Url})", i.Content));
+        Assert.Equal(steps[0].Id, second.State.Ids["s:t/0"]);
+        Assert.Equal(steps[1].Id, second.State.Ids["s:t/1"]);
+        Assert.True(steps[0].Checked);
+        Assert.Equal("2026-11-15T09:30:00.000000Z", steps[0].CompletedAt);
+        Assert.False(steps[1].Checked);
+        Assert.False(parent.Checked);
+        Assert.Equal(96 + 3, fake.Items.Count);
+    }
+
+    [Theory]
+    [InlineData("https://www.learndash.com/", "[LearnDash Learning Management System & Software. Sell Courses with WordPress](https://www.learndash.com/)")]
+    [InlineData("Read https://a.example/x later", "Read [A [beta] title](https://a.example/x) later")]
+    [InlineData("https://en.wikipedia.org/wiki/Foo_(bar)", "[Foo (bar) - Wikipedia](https://en.wikipedia.org/wiki/Foo_(bar))")]
+    [InlineData("https://a.example/", "[Title \\] escaped](https://a.example/ \"tooltip\")")]
+    [InlineData("Plain text", "Plain text")]
+    public void Match_key_counts_a_markdown_link_as_its_address(string planned, string returned)
+    {
+        Assert.Equal(TodoistTransfer.MatchKey(planned), TodoistTransfer.MatchKey(returned));
+    }
+
+    [Theory]
+    [InlineData("https://a.example/", "[Title](https://b.example/)")]
+    [InlineData("Buy milk", "Buy bread")]
+    [InlineData("Read https://a.example/x later", "[Title](https://a.example/x)")]
+    public void Match_key_keeps_different_contents_apart(string planned, string returned)
+    {
+        Assert.NotEqual(TodoistTransfer.MatchKey(planned), TodoistTransfer.MatchKey(returned));
+    }
+
     [Fact]
     public async Task Resume_after_a_request_that_never_arrived_sends_it_normally()
     {
@@ -476,6 +577,13 @@ public class TodoistTransferTests
         Assert.False(plan.CanStart);
         Assert.Contains("needs 2 new Todoist projects", Assert.Single(plan.Problems));
         Assert.Contains("only 1 more fit", plan.Problems[0]);
+        Assert.True(plan.TooManyProjects);
+        Assert.Equal(
+            ["Make room for 1 more project in Todoist (archive or delete one), or choose fewer lists with --lists so that at most 1 project is needed."],
+            TodoistPlanText.Fixes(plan, PlanAudience.CommandLine));
+        Assert.Equal(
+            ["Make room for 1 more project in Todoist (archive or delete one), or choose fewer lists so that at most 1 project is needed."],
+            TodoistPlanText.Fixes(plan, PlanAudience.Web));
 
         var chosen = TodoistPlanner.Build(Rich(), new TodoistPlanSettings { PlannedAt = Now, Lists = ["Home"] }, account);
         Assert.True(chosen.CanStart);
@@ -500,6 +608,10 @@ public class TodoistTransferTests
         var plan = TodoistPlanner.Build(Rich(), new TodoistPlanSettings { PlannedAt = Now }, account);
         Assert.False(plan.CanStart);
         Assert.Contains("already has a project named \"Work\"", Assert.Single(plan.Problems));
+        Assert.Equal(["Work"], plan.NameClashes);
+        Assert.DoesNotContain("--", plan.Problems[0]);
+        Assert.Equal(["Rename or remove the Todoist project named \"Work\", or leave that list out."], TodoistPlanText.Fixes(plan, PlanAudience.Web));
+        Assert.Contains("--allow-duplicate-names", Assert.Single(TodoistPlanText.Fixes(plan, PlanAudience.CommandLine)));
 
         var run = await Transfer(Rich(), fake, allowDuplicates: true);
         Assert.Equal(TransferStatus.Completed, run.Result.Status);

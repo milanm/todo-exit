@@ -152,6 +152,12 @@ public sealed class TodoistPlan
     /// <summary>Projects the account can still take, or null when unknown.</summary>
     public int? ProjectsAvailable { get; init; }
 
+    /// <summary>The plan needs more new projects than the account can take.</summary>
+    public bool TooManyProjects => ProjectsAvailable is { } free && ProjectsNeeded > free;
+
+    /// <summary>Names of new projects that already exist in the account, when duplicates are not allowed.</summary>
+    public IReadOnlyList<string> NameClashes { get; init; } = [];
+
     public bool CanStart => Problems.Count == 0;
 
     public override string ToString() => $"TodoistPlan({Projects.Count} projects)";
@@ -256,32 +262,24 @@ public static class TodoistPlanner
         var all = lists.SelectMany(l => l.Projects).ToList();
         var notSent = all.Where(p => state is null || !state.Sent.Contains(state.Uuid(TodoistTransfer.ProjectAdd, p.Key))).ToList();
         int? available = null;
+        var clashes = new List<string>();
         if (account is not null)
         {
             if (account.MaxProjects is { } maxProjects)
             {
                 available = Math.Max(0, maxProjects - account.CountedProjects);
-                if (notSent.Count > available)
-                {
-                    problems.Add(
-                        $"This transfer needs {notSent.Count} new Todoist projects, but your plan allows {maxProjects} and you have {account.CountedProjects}, " +
-                        $"so only {available} more fit. Choose lists with --lists so that at most {available} projects are needed.");
-                }
             }
 
             var ours = state?.Ids.Values.ToHashSet(StringComparer.Ordinal) ?? new HashSet<string>(StringComparer.Ordinal);
             var existing = account.Projects.Where(p => !ours.Contains(p.Id)).Select(p => p.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var clashes = notSent.Where(p => existing.Contains(p.Name)).Select(p => p.Name).ToList();
-            if (clashes.Count > 0 && !settings.AllowDuplicateNames)
+            var sameName = notSent.Where(p => existing.Contains(p.Name)).Select(p => p.Name).ToList();
+            if (sameName.Count > 0 && !settings.AllowDuplicateNames)
             {
-                problems.Add(
-                    $"Your Todoist account already has {(clashes.Count == 1 ? "a project" : "projects")} named {string.Join(", ", clashes.Select(n => $"\"{n}\""))}. " +
-                    "todo-exit never adds tasks to an existing project. Rename or remove that project in Todoist, leave the list out with --lists, " +
-                    "or use --allow-duplicate-names to create a new project with the same name.");
+                clashes = sameName;
             }
-            else if (clashes.Count > 0)
+            else if (sameName.Count > 0)
             {
-                warnings.Add($"New projects will have the same name as existing ones: {string.Join(", ", clashes.Select(n => $"\"{n}\""))}.");
+                warnings.Add($"New projects will have the same name as existing ones: {string.Join(", ", sameName.Select(n => $"\"{n}\""))}.");
             }
 
             var labels = all.SelectMany(p => p.Items).SelectMany(i => i.Labels).Distinct(StringComparer.OrdinalIgnoreCase).Count();
@@ -289,6 +287,8 @@ public static class TodoistPlanner
             {
                 warnings.Add($"The tasks use {labels} different labels; your plan allows {maxLabels}. Todoist may refuse some of them.");
             }
+
+            problems.AddRange(TodoistPlanText.Problems(notSent.Count, account.MaxProjects, account.CountedProjects, available, clashes));
         }
 
         return new TodoistPlan
@@ -301,6 +301,7 @@ public static class TodoistPlanner
             Warnings = warnings,
             ProjectsNeeded = notSent.Count,
             ProjectsAvailable = available,
+            NameClashes = clashes,
         };
     }
 

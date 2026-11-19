@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using TodoExit.Core.Export;
 
 namespace TodoExit.Core.Todoist;
@@ -519,10 +520,15 @@ public static class TodoistTransfer
 
             var projectId = HasId(state, project.Key) ? state.Ids[project.Key] : null;
             var parentId = item.ParentKey is null ? null : HasId(state, item.ParentKey) ? state.Ids[item.ParentKey] : null;
+
+            // Only tasks in a project this transfer created, under the expected parent, not yet claimed, with the same
+            // content once Markdown links are reduced to their address. Among equal candidates the earliest one wins:
+            // the plan is walked in creation order, so the n-th such sibling in the plan gets the n-th one in Todoist.
+            var key = MatchKey(item.Content);
             var match = projectId is null || (item.ParentKey is not null && parentId is null)
                 ? null
                 : items
-                    .Where(i => i.ProjectId == projectId && i.ParentId == parentId && i.Content == item.Content && !claimed.Contains(i.Id))
+                    .Where(i => i.ProjectId == projectId && i.ParentId == parentId && !claimed.Contains(i.Id) && MatchKey(i.Content) == key)
                     .OrderBy(i => i.ChildOrder)
                     .FirstOrDefault();
             if (match is not null)
@@ -540,6 +546,22 @@ public static class TodoistTransfer
 
         state.Unresolved.Clear();
     }
+
+    /// <summary>
+    /// A Markdown link "[text](address)" or "[text](address "title")": the text may hold one level of brackets and
+    /// escaped characters, the address one level of parentheses.
+    /// </summary>
+    private static readonly Regex MarkdownLink = new(
+        @"\[(?:\\.|[^\[\]\\]|\[[^\[\]]*\])*\]\((?<url>(?:[^\s()]|\([^\s()]*\))+)(?:\s+""[^""]*"")?\)",
+        RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// The form task content is compared in when ids are recovered. Todoist rewrites a bare address in the content,
+    /// some time after the task is created, into a Markdown link titled with the page title, so
+    /// "https://example.com/" may come back as "[Example Domain](https://example.com/)". Each link counts as its address.
+    /// </summary>
+    internal static string MatchKey(string content) =>
+        MarkdownLink.Replace(content, m => m.Groups["url"].Value).Trim();
 
     private static TransferError Error(PlannedCommand c, string kind, string? tag, string message) =>
         new(kind, c.Type, c.Key, c.Project.ListName, c.Item?.TaskTitle, tag, message);

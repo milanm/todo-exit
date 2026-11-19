@@ -103,19 +103,25 @@ internal static class TransferCommand
             var plan = TodoistPlanner.Build(archive, settings, account, state);
             await stdout.WriteAsync(FormatPlan(plan, state));
 
+            if (!plan.CanStart)
+            {
+                await stdout.WriteLineAsync();
+                await stdout.WriteAsync(FormatFixes(plan));
+                if (options.Yes)
+                {
+                    await stderr.WriteLineAsync("error: the transfer cannot start; see the problems above. Nothing was written to Todoist.");
+                }
+
+                return Program.ExitFailure;
+            }
+
             if (!options.Yes)
             {
                 await stdout.WriteLineAsync();
                 await stdout.WriteLineAsync(account is null
                     ? "Nothing was written to Todoist. This plan was made without a Todoist token, so account limits and existing projects were not checked."
                     : "Nothing was written to Todoist. Run the same command with --yes to transfer.");
-                return plan.CanStart ? Program.ExitOk : Program.ExitFailure;
-            }
-
-            if (!plan.CanStart)
-            {
-                await stderr.WriteLineAsync("error: the transfer cannot start; see the problems above. Nothing was written to Todoist.");
-                return Program.ExitFailure;
+                return Program.ExitOk;
             }
 
             var outDir = Path.GetFullPath(options.OutDir ?? (statePath is null ? "." : Path.GetDirectoryName(statePath)!));
@@ -233,7 +239,8 @@ internal static class TransferCommand
             }
 
             var projects = list.Projects;
-            var counts = $"{N(projects.Sum(p => p.OpenTasks))} tasks, {N(projects.Sum(p => p.OpenSubTasks))} sub-tasks";
+            var counts = $"{TodoistPlanText.Count(projects.Sum(p => p.OpenTasks), "task", "tasks")}, " +
+                TodoistPlanText.Count(projects.Sum(p => p.OpenSubTasks), "sub-task", "sub-tasks");
             var done = projects.Sum(p => p.CompletedTasks + p.CompletedSubTasks);
             if (done > 0)
             {
@@ -243,7 +250,7 @@ internal static class TransferCommand
             var reminders = projects.Sum(p => p.Reminders);
             if (reminders > 0)
             {
-                counts += $", {N(reminders)} reminders";
+                counts += ", " + TodoistPlanText.Count(reminders, "reminder", "reminders");
             }
 
             sb.AppendLine(projects.Count == 1
@@ -253,14 +260,14 @@ internal static class TransferCommand
 
         sb.AppendLine($"  New projects needed: {plan.ProjectsNeeded}{(plan.ProjectsAvailable is { } free ? $" (account has room for {free})" : string.Empty)}");
 
-        var aggregated = LossCatalog.Aggregate(plan.Losses);
-        if (aggregated.Count > 0)
+        var lines = TodoistPlanText.LossLines(plan.Losses);
+        if (lines.Count > 0)
         {
             sb.AppendLine();
             sb.AppendLine("  Will not carry over:");
-            foreach (var g in aggregated.GroupBy(l => l.Kind).OrderByDescending(g => g.Sum(l => l.Count)))
+            foreach (var line in lines)
             {
-                sb.AppendLine($"    {g.Key}: {N(g.Sum(l => l.Count))}. {LossCatalog.Meaning(g.Key, ExportFormatNames.TodoistApi)}");
+                sb.AppendLine("    " + line);
             }
         }
 
@@ -274,6 +281,22 @@ internal static class TransferCommand
             sb.AppendLine().AppendLine("  Problem: " + problem);
         }
 
+        return sb.ToString();
+    }
+
+    /// <summary>What has to be fixed before the transfer can start, for a plan with problems.</summary>
+    internal static string FormatFixes(TodoistPlan plan)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine(plan.Problems.Count == 1
+            ? "Nothing was written to Todoist. The transfer cannot start until this is fixed:"
+            : "Nothing was written to Todoist. The transfer cannot start until these are fixed:");
+        foreach (var fix in TodoistPlanText.Fixes(plan, PlanAudience.CommandLine))
+        {
+            sb.AppendLine("  - " + fix);
+        }
+
+        sb.AppendLine("Then run the same command again to see the new plan.");
         return sb.ToString();
     }
 

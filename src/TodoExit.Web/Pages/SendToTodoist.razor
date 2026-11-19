@@ -1,0 +1,207 @@
+@using TodoExit.Core.Export
+@using TodoExit.Core.Todoist
+
+<section class="section" id="send-to-todoist">
+    <h2>5. Send to Todoist</h2>
+    <p>
+        This step is optional. Instead of importing the CSV files, todo-exit can create the projects and tasks
+        in your Todoist account through the Todoist API. It never changes or deletes anything that is already there.
+    </p>
+
+    @if (IsSample)
+    {
+        <p class="notice">You are using the sample data. These tasks are fictional, but if you transfer them, they are really created in your Todoist account.</p>
+    }
+
+    <div class="field">
+        <label for="todoist-token">Todoist API token</label>
+        <input id="todoist-token" class="text-input" type="password" autocomplete="off" autocapitalize="off" spellcheck="false"
+               data-lpignore="true" data-1p-ignore="true" aria-describedby="todoist-token-hint"
+               disabled="@Running" @bind="_token" @bind:event="oninput" @bind:after="TokenChanged" />
+        <p class="hint" id="todoist-token-hint">Find it in Todoist under Settings, Integrations, Developer. It stays in this tab's memory and is not saved anywhere.</p>
+        @if (_token.Length > 0 && !Running)
+        {
+            <button type="button" class="link-button" @onclick="ForgetToken">Forget token</button>
+        }
+    </div>
+
+    <fieldset class="options" disabled="@ChoicesLocked">
+        <legend>Lists to transfer</legend>
+        @if (_lists.Count == 0)
+        {
+            <p>No list has tasks to transfer with these choices.</p>
+        }
+        @foreach (var name in _lists)
+        {
+            <label><input type="checkbox" checked="@_chosen.Contains(name)" @onchange="e => ToggleList(name, e)" /> @name</label>
+        }
+        <label class="sub-option"><input type="checkbox" @bind="_includeCompleted" @bind:after="IncludeCompletedChanged" /> Include completed tasks. They are created and then marked as completed, with their completion date.</label>
+        <p class="hint">Completed tasks take about 15 seconds per 100 items.</p>
+    </fieldset>
+
+    @if (ChoicesLocked && !Running)
+    {
+        <p>The choices cannot change until this transfer is finished. Continue it, or download its state and finish it with the command-line tool.</p>
+    }
+
+    <div class="actions">
+        <button type="button" class="button secondary" disabled="@(!CanShowPlan)" @onclick="ShowPlanAsync">Show plan</button>
+    </div>
+
+    @if (_status is not null)
+    {
+        <p class="status" role="status">@_status</p>
+    }
+
+    @if (_error is not null)
+    {
+        <p class="error" role="alert">@_error</p>
+    }
+
+    @if (_session?.Plan is { } plan)
+    {
+        <h3>Plan</h3>
+        @if (_session.State is null)
+        {
+            <p>Nothing has been written to Todoist. Showing the plan only read your Todoist account.</p>
+        }
+        else
+        {
+            <p>This is the plan the transfer uses.</p>
+        }
+
+        <table class="table counts">
+            <tbody>
+                <tr><th scope="row">Todoist account</th><td>@(plan.Account?.Email ?? "unknown")</td></tr>
+                <tr><th scope="row">Todoist plan</th><td>@PlanName(plan.Account)</td></tr>
+                <tr><th scope="row">New projects needed</th><td>@plan.ProjectsNeeded</td></tr>
+                <tr><th scope="row">Room for new projects</th><td>@(plan.ProjectsAvailable?.ToString() ?? "unknown")</td></tr>
+                <tr><th scope="row">Active tasks per project</th><td>@plan.Settings.MaxTasksPerProject</td></tr>
+                <tr><th scope="row">Reminders</th><td>@(plan.Account?.Reminders == true ? "yes" : "no")</td></tr>
+            </tbody>
+        </table>
+
+        <ul class="plan-lists">
+            @foreach (var list in plan.Lists)
+            {
+                var lines = TodoistPlanText.LossLines(plan.Losses.Where(l => l.List == list.ListName && l.Kind != LossKinds.ListNotSelected));
+                if (!_lists.Contains(list.ListName) && list.Projects.Count == 0 && lines.Count == 0)
+                {
+                    continue;
+                }
+
+                <li>
+                    <p class="plan-list-name">@list.ListName</p>
+                    @if (list.Skipped is { } why)
+                    {
+                        <p>Not transferred: @why.</p>
+                    }
+                    else
+                    {
+                        <p>@ProjectNames(list): @ListCounts(list)</p>
+                    }
+                    @if (lines.Count > 0)
+                    {
+                        <ul class="plain">
+                            @foreach (var line in lines)
+                            {
+                                <li>@line</li>
+                            }
+                        </ul>
+                    }
+                </li>
+            }
+        </ul>
+
+        @foreach (var warning in plan.Warnings)
+        {
+            <p>Warning: @warning</p>
+        }
+
+        @if (!plan.CanStart)
+        {
+            @foreach (var problem in plan.Problems)
+            {
+                <p class="error">Problem: @problem</p>
+            }
+            <p>The transfer cannot start until this is fixed:</p>
+            <ul class="plain">
+                @foreach (var fix in TodoistPlanText.Fixes(plan, PlanAudience.Web))
+                {
+                    <li>@fix</li>
+                }
+            </ul>
+            <p>Then choose Show plan again.</p>
+        }
+        else if (_session.State is null)
+        {
+            <label class="check"><input type="checkbox" @bind="_confirmed" /> I understand that this writes to my Todoist account and that todo-exit cannot undo it.</label>
+        }
+
+        <div class="actions">
+            @if (_session.State is null)
+            {
+                <button type="button" class="button" disabled="@(!CanTransfer)" @onclick="TransferAsync">Transfer to Todoist</button>
+            }
+            else if (_session.CanContinue && !Running)
+            {
+                <button type="button" class="button" disabled="@(_token.Length == 0)" @onclick="TransferAsync">Continue</button>
+                <button type="button" class="button secondary" @onclick="DownloadStateAsync">Download transfer state</button>
+            }
+        </div>
+
+        @if (Running)
+        {
+            <button type="button" class="link-button" @onclick="Cancel">Cancel</button>
+        }
+
+        @if (_session.CanContinue && !Running)
+        {
+            <p class="hint">
+                Continue needs the token in the field above. The command-line tool can also continue this transfer:
+                run todo-exit transfer with --from-archive and the archive.json from step 4, --resume and the downloaded
+                todoist-transfer-state.json, your token, and --yes.
+            </p>
+        }
+    }
+
+    @if (_session?.Result is not null)
+    {
+        var c = _session.Counts();
+        <h3>Result</h3>
+        <table class="table counts">
+            <tbody>
+                <tr><th scope="row">Projects created</th><td>@c.Projects</td></tr>
+                <tr><th scope="row">Tasks</th><td>@c.Tasks</td></tr>
+                <tr><th scope="row">Sub-tasks</th><td>@c.SubTasks</td></tr>
+                <tr><th scope="row">Completed in Todoist</th><td>@c.Completed</td></tr>
+                <tr><th scope="row">Reminders</th><td>@c.Reminders</td></tr>
+                <tr><th scope="row">Errors from Todoist</th><td>@c.Errors</td></tr>
+                <tr><th scope="row">Skipped (parent not created)</th><td>@c.Skipped</td></tr>
+            </tbody>
+        </table>
+
+        @if (_session.State!.Errors.Count > 0)
+        {
+            <h4>What Todoist did not accept</h4>
+            @foreach (var group in _session.State.Errors.GroupBy(e => e.List))
+            {
+                <p class="plan-list-name">@group.Key</p>
+                <ul class="loss-list">
+                    @foreach (var e in group)
+                    {
+                        <li>@if (e.Task is not null)
+                            {
+                                <span class="loss-where">@e.Task</span>
+                            } @e.Message</li>
+                    }
+                </ul>
+            }
+        }
+
+        <div class="actions">
+            <button type="button" class="button secondary" @onclick="DownloadReportAsync">Download transfer report</button>
+            <button type="button" class="button secondary" @onclick="DownloadReportJsonAsync">Download report as JSON</button>
+        </div>
+    }
+</section>

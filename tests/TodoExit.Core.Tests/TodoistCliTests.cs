@@ -60,8 +60,11 @@ public class TodoistCliTests
         Assert.Contains("Limits: 5 projects, 0 in use, 5 free; 300 active tasks per project; reminders no", stdout);
         Assert.Contains("Work -> \"Work\": 2 tasks, 2 sub-tasks", stdout);
         Assert.Contains("Empty: skipped (nothing to transfer)", stdout);
-        Assert.Contains("Home -> \"Home\": 1 tasks, 0 sub-tasks", stdout);
-        Assert.Contains("reminder-not-carried: 1.", stdout);
+        Assert.Contains("Home -> \"Home\": 1 task, 0 sub-tasks", stdout);
+        Assert.Contains("    1 reminder is not added: your Todoist plan has no reminders", stdout);
+        Assert.Contains("    1 completed task is left out. Completed tasks are transferred only if you choose to include them.", stdout);
+        Assert.DoesNotContain("reminder-not-carried", stdout);
+        Assert.DoesNotContain("completed-skipped", stdout);
         Assert.Contains("Nothing was written to Todoist. Run the same command with --yes to transfer.", stdout);
         Assert.Empty(fake.Writes);
         Assert.False(Directory.Exists(outDir));
@@ -227,9 +230,32 @@ public class TodoistCliTests
             "--todoist-token", FakeTodoist.Token, "--yes");
 
         Assert.Equal(Program.ExitFailure, code);
-        Assert.Contains("Problem: This transfer needs 2 new Todoist projects", stdout);
+        Assert.Contains("Problem: This transfer needs 2 new Todoist projects, but your plan allows 1 project and you already have 0, so only 1 more fit.", stdout);
         Assert.Contains("Nothing was written to Todoist", err);
+        Assert.Contains("  - Make room for 1 more project in Todoist (archive or delete one), or choose fewer lists with --lists so that at most 1 project is needed.", stdout);
         Assert.Empty(fake.Writes);
+
+        // Without --yes the plan ends with what to fix, not with the advice to add --yes.
+        (code, stdout, _) = await Run(fake, "transfer", "--from-archive", archive, "--todoist-token", FakeTodoist.Token);
+        Assert.Equal(Program.ExitFailure, code);
+        Assert.Contains("Nothing was written to Todoist. The transfer cannot start until this is fixed:", stdout);
+        Assert.Contains("Then run the same command again to see the new plan.", stdout);
+        Assert.DoesNotContain("--yes to transfer", stdout);
+        Assert.Empty(fake.Writes);
+
+        // An account with no room at all.
+        var full = new FakeTodoist { MaxProjects = 2 };
+        full.AddProject("A");
+        full.AddProject("B");
+        full.AddProject("home");
+        (code, stdout, _) = await Run(full, "transfer", "--from-archive", archive, "--todoist-token", FakeTodoist.Token, "--lists", "Home");
+        Assert.Equal(Program.ExitFailure, code);
+        Assert.Contains("needs 1 new Todoist project, but your plan allows 2 projects and you already have 3, so no more fit.", stdout);
+        Assert.Contains("already has a project named \"Home\"", stdout);
+        Assert.Contains("The transfer cannot start until these are fixed:", stdout);
+        Assert.Contains("  - Make room for 1 project in Todoist (archive or delete one), or choose fewer lists with --lists.", stdout);
+        Assert.Contains("  - Rename or remove the Todoist project named \"Home\", leave that list out with --lists, or add --allow-duplicate-names", stdout);
+        Assert.Empty(full.Writes);
 
         (code, _, _) = await Run(fake, "transfer", "--from-archive", archive, "--out", Path.Combine(dir, "out"),
             "--todoist-token", FakeTodoist.Token, "--lists", "Home", "--yes");

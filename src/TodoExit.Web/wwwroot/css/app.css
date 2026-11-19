@@ -333,3 +333,71 @@ summary {
         width: 100%;
     }
 }
+
+/* Step 5: send to Todoist. */
+
+.field {
+    margin: 1rem 0 1.5rem;
+}
+
+.field label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 0.35rem;
+}
+
+.text-input {
+    font: inherit;
+    width: 100%;
+    max-width: 26rem;
+    padding: 0.55rem 0.7rem;
+    border: 1px solid var(--muted);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+}
+
+.text-input:disabled {
+    opacity: 0.6;
+}
+
+.field .hint {
+    margin: 0.4rem 0 0.3rem;
+}
+
+.options legend {
+    font-weight: 600;
+    padding: 0;
+    margin-bottom: 0.2rem;
+}
+
+.options:disabled label {
+    cursor: not-allowed;
+    color: var(--muted);
+}
+
+.options .hint {
+    margin: 0 0 0 1.7rem;
+}
+
+.plan-lists {
+    list-style: none;
+    margin: 1.5rem 0;
+    padding: 0;
+    border-top: 1px solid var(--line);
+}
+
+.plan-lists > li {
+    padding: 0.8rem 0 0.4rem;
+    border-bottom: 1px solid var(--line);
+}
+
+.plan-list-name {
+    font-weight: 600;
+    margin-bottom: 0.2rem;
+}
+
+h4 {
+    font-size: 1rem;
+    margin: 1.4em 0 0.5em;
+}

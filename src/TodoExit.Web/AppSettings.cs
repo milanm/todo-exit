@@ -6,6 +6,7 @@ public sealed class AppSettings
 {
     public const string GraphScope = "https://graph.microsoft.com/Tasks.Read";
     public const string GraphClientName = "Graph";
+    public const string TodoistClientName = "Todoist";
     public const string RepositoryUrl = "https://github.com/milanm/todo-exit";
 
     /// <summary>False while appsettings.json still holds the placeholder client id.</summary>
