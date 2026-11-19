@@ -7,7 +7,7 @@ Microsoft retires the Microsoft To Do apps on June 30, 2027. Personal Microsoft 
 There are two ways to run it:
 
 - a command-line tool (`todo-exit`), which signs you in with your Microsoft account by itself
-- a web app that runs in your browser, with no server of its own. The web app will be published at https://milanm.github.io/todo-exit/; until then, run it locally as described below.
+- a web app that runs in your browser, with no server of its own: https://milanm.github.io/todo-exit/. Nothing to install.
 
 ## What it exports
 
@@ -158,6 +158,8 @@ After import, Todoist turns plain web addresses in task names and descriptions i
 
 ## Run the web app locally
 
+You only need this to work on the code or to host your own copy. Otherwise use https://milanm.github.io/todo-exit/.
+
 ```
 dotnet run --project src/TodoExit.Web
 ```
@@ -190,12 +192,13 @@ The archive is the source of truth. The reader saves raw Graph JSON, and every o
 
 As of 2026-11-19:
 
-- One personal Microsoft account with 14 lists and about 12,700 tasks, read by the command-line tool on Windows and by the web app run locally. Both gave the same counts.
+- One personal Microsoft account with 14 lists and about 12,700 tasks, read by the command-line tool on Windows, by the web app run locally and by the hosted web app. All three gave the same counts.
+- The hosted web app's network requests during that read went to three hosts: `milanm.github.io` for the app's own files, `login.microsoftonline.com` and `graph.microsoft.com`.
 - The Todoist CSV files: three of them (49, 101 and 294 tasks) were imported into a free Todoist account and read back through Todoist's API. Sub-tasks, priorities, labels, descriptions and dates matched.
 - The repeat-rule phrases in `RecurrenceText.cs`: Todoist accepted every phrase the tool can write as a recurring task with the right next date.
 - The unit tests run on Linux and Windows on every push.
 
-Not tested yet: work and school accounts, `--resume` against the real Graph (it is covered by tests against a fake one), and the hosted web app.
+Not tested yet: work and school accounts, `--resume` against the real Graph (it is covered by tests against a fake one), and signing out of the hosted web app.
 
 ### Microsoft Graph behavior observed
 
@@ -212,7 +215,7 @@ These are observations from that one account in November 2026, and they shaped t
 - Phase 2: transfer tasks directly to Todoist through its API, including completed tasks and reminders where the API allows.
 - Ready-made executables for Windows, macOS and Linux, so the command-line tool does not need the .NET SDK.
 - Rules like "the last Sunday of October" (`relativeYearly`) are still written as `every year` with a note in the report.
-- The hosted web app at https://milanm.github.io/todo-exit/.
+- A Content Security Policy for the web app, so the browser itself blocks requests to any other server.
 
 ## Not affiliated
 
