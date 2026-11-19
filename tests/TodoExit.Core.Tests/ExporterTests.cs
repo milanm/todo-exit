@@ -373,7 +373,11 @@ public class LossReportTests
         var inventory = json["inventory"]!.AsObject();
         Assert.Equal(2, (int)inventory["tasks"]!);
         Assert.Equal(1, (int)inventory["sharedLists"]!);
-        Assert.Equal(11, inventory.Count);
+        Assert.Equal(13, inventory.Count);
+        Assert.Equal(0, (int)inventory["unreadable"]!);
+        Assert.Equal(0, (int)inventory["partial"]!);
+        Assert.Empty(json["readErrors"]!.AsArray());
+        Assert.False((bool)json["stepsForCompletedTasksSkipped"]!);
 
         var losses = json["losses"]!.AsArray().Select(n => n!.AsObject()).ToList();
         var kinds = losses.Select(l => ((string)l["format"]!, (string)l["kind"]!)).ToHashSet();
@@ -389,6 +393,60 @@ public class LossReportTests
         var shared = losses.Single(l => (string)l["kind"]! == "shared-list-members-not-carried");
         Assert.True(shared.ContainsKey("task"));
         Assert.Null(shared["task"]);
+    }
+
+    [Fact]
+    public void Read_errors_are_reported_for_every_format_including_the_archive()
+    {
+        var notes = new Model.ReadNotes(true,
+        [
+            new Model.ReadError("task-unreadable", "list-Shared", "Shared", null, null, 9269, "broken"),
+            new Model.ReadError("task-partial", "list-Shared", "Shared", "T9", "Half task", 12, "partial read"),
+            new Model.ReadError("steps-unreadable", "list-Shared", "Shared", "T1", "Open", null, "404"),
+        ]);
+        var doc = TodoExit.Core.Archive.TodoArchiveDocument.Create(
+            new DateTimeOffset(2026, 11, 19, 13, 30, 0, TimeSpan.Zero),
+            [new TodoExit.Core.Archive.ArchivedList(TestData.List("Shared"), [
+                TestData.Task("Open"),
+                TestData.Task("Half task", """{ "todoExitPartial": true }"""),
+            ])],
+            notes);
+        var archive = Model.ArchiveParser.Parse(doc, TestData.Belgrade);
+        var result = ExportService.Export(doc, archive, new ExportOptions(ExportFormats.Json));
+
+        var json = JsonNode.Parse(result.Files.Single(f => f.Path == "report.json").GetText())!.AsObject();
+        Assert.True((bool)json["stepsForCompletedTasksSkipped"]!);
+        var errors = json["readErrors"]!.AsArray().Select(n => n!.AsObject()).ToList();
+        Assert.Equal(["task-unreadable", "task-partial", "steps-unreadable"], errors.Select(e => (string)e["kind"]!));
+        Assert.Equal(9269, (int)errors[0]["position"]!);
+        Assert.Null(errors[0]["taskId"]);
+        Assert.True(errors[0].ContainsKey("taskTitle"));
+        Assert.Equal(1, (int)json["inventory"]!["unreadable"]!);
+        Assert.Equal(1, (int)json["inventory"]!["partial"]!);
+        Assert.Empty(json["losses"]!.AsArray());
+
+        var md = result.Files.Single(f => f.Path == "report.md").GetText();
+        Assert.Contains("## Could not be read from Microsoft Graph", md);
+        Assert.Contains("| task-unreadable | 1 |", md);
+        Assert.Contains("Task at position 9269", md);
+        Assert.Contains("Steps of completed tasks were not read, by choice", md);
+        Assert.DoesNotContain("It has no losses.", md);
+        Assert.Contains("| Unreadable (skipped) | 1 |", md);
+        Assert.Contains("| Partial | 1 |", md);
+
+        // Partial tasks are exported normally.
+        var csv = GenericCsvExporter.Export(archive).GetText();
+        Assert.Contains("Shared,Half task,open", csv);
+    }
+
+    [Fact]
+    public void Report_without_read_errors_has_no_read_section()
+    {
+        var doc = Doc();
+        var archive = Model.ArchiveParser.Parse(doc, TestData.Belgrade);
+        var md = ExportService.Export(doc, archive, new ExportOptions()).Report.ToMarkdown();
+        Assert.DoesNotContain("Could not be read", md);
+        Assert.Contains("It has no losses.", md);
     }
 
     [Fact]

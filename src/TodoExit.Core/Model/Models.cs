@@ -8,7 +8,11 @@ public enum Importance
 }
 
 /// <summary>The typed view of an archive. Built by <see cref="ArchiveParser"/>.</summary>
-public sealed record TodoArchive(DateTimeOffset? ExportedAt, IReadOnlyList<TaskList> Lists);
+public sealed record TodoArchive(DateTimeOffset? ExportedAt, IReadOnlyList<TaskList> Lists)
+{
+    /// <summary>What the read could not get from Graph. Empty for archives without "readNotes".</summary>
+    public ReadNotes ReadNotes { get; init; } = ReadNotes.Empty;
+}
 
 public sealed record TaskList(
     string Id,
@@ -23,6 +27,9 @@ public sealed record TodoItem
     public string Id { get; init; } = string.Empty;
 
     public string Title { get; init; } = string.Empty;
+
+    /// <summary>True when only some properties could be read from Graph ("todoExitPartial": true).</summary>
+    public bool IsPartial { get; init; }
 
     /// <summary>Plain-text notes. Null when the body is empty.</summary>
     public string? Notes { get; init; }

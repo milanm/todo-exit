@@ -19,8 +19,10 @@ public static class Program
 
         Usage:
           todo-exit inventory (--token <t> | --token-file <path> | --from-archive <file>) [--timezone <IANA id>]
+                              [--skip-completed-steps]
           todo-exit export    (--token <t> | --token-file <path> | --from-archive <file>) --out <dir>
                               [--formats json,markdown,todoist,csv] [--include-completed] [--timezone <IANA id>]
+                              [--skip-completed-steps]
 
         Options:
           --token <t>           Microsoft Graph access token with Tasks.Read. Can also come from TODOEXIT_TOKEN.
@@ -29,6 +31,7 @@ public static class Program
           --out <dir>           Output directory for export.
           --formats <list>      Comma-separated: json, markdown, todoist, csv. Default: all four.
           --include-completed   Write completed tasks and checked steps to the Todoist CSV as open tasks.
+          --skip-completed-steps Do not read steps of completed tasks (faster for large accounts).
           --timezone <id>       Time zone for dates, e.g. Europe/Belgrade. Default: this computer's zone.
           -h, --help            Show this help.
         """;
@@ -124,25 +127,36 @@ public static class Program
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
         http.DefaultRequestHeaders.UserAgent.ParseAdd("todo-exit/0.1");
 
-        var reader = new GraphTodoReader(http);
-        var progress = new SyncProgress<ReadProgress>(p =>
-        {
-            var current = p.CurrentList is null ? string.Empty : $" ({p.CurrentList})";
-            Console.Error.Write($"\rReading lists {p.ListsDone}/{p.ListsTotal}, tasks {p.TasksRead}{current}".PadRight(78));
-        });
+        var reader = new GraphTodoReader(http) { IncludeStepsForCompletedTasks = !options.SkipCompletedSteps };
+        var progress = new SyncProgress<ReadProgress>(p => Console.Error.Write("\r" + FormatProgress(p).PadRight(90)));
 
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         var document = await reader.ReadAsync(progress, cancellationToken);
+        stopwatch.Stop();
+
+        var lists = document.Lists.Count;
+        var tasks = document.Lists.OfType<System.Text.Json.Nodes.JsonObject>()
+            .Sum(l => (l["tasks"] as System.Text.Json.Nodes.JsonArray)?.Count ?? 0);
+        var errors = document.ReadNotes.Errors.Count;
         Console.Error.WriteLine();
-        if (reader.UsedChecklistFallback)
-        {
-            Console.Error.WriteLine("Note: Graph rejected $expand=checklistItems; steps were read one task at a time.");
-        }
-        else if (reader.UsedPerTaskChecklistRequests)
-        {
-            Console.Error.WriteLine("Note: Graph returned tasks without steps; steps were read one task at a time.");
-        }
+        Console.Error.WriteLine(
+            $"Read {lists} lists and {tasks} tasks in {stopwatch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s. " +
+            (errors == 0 ? "No read errors." : $"{errors} read errors, listed in report.md."));
 
         return document;
+    }
+
+    internal static string FormatProgress(ReadProgress p)
+    {
+        var list = p.CurrentList is null ? string.Empty : $" ({p.CurrentList})";
+        var position = p.ListsTotal > 0 ? $"list {Math.Min(p.ListsDone + 1, p.ListsTotal)}/{p.ListsTotal}{list}" : "lists";
+        return p.Phase switch
+        {
+            ReadPhase.Lists => "Reading lists...",
+            ReadPhase.Tasks => $"Reading tasks: {position}, {p.TasksRead} tasks",
+            ReadPhase.Steps => $"Reading steps: {position}, {p.StepsDone}/{p.StepsTotal} tasks",
+            _ => $"Reading attachments: {position}, {p.TasksRead} tasks",
+        };
     }
 
     internal static string FormatInventory(Inventory inventory)
@@ -212,6 +226,8 @@ internal sealed class Options
     public ExportFormats Formats { get; private set; } = ExportFormats.All;
 
     public bool IncludeCompleted { get; private set; }
+
+    public bool SkipCompletedSteps { get; private set; }
 
     public TimeZoneInfo TimeZone { get; private set; } = TimeZoneInfo.Local;
 
@@ -285,6 +301,14 @@ internal sealed class Options
                     break;
                 case "--formats" when o.Command == "export":
                     formats = Value();
+                    break;
+                case "--skip-completed-steps":
+                    if (inline is not null)
+                    {
+                        throw new UsageException("--skip-completed-steps does not take a value");
+                    }
+
+                    o.SkipCompletedSteps = true;
                     break;
                 case "--include-completed" when o.Command == "export":
                     if (inline is not null)

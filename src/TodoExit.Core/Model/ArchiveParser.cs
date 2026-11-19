@@ -37,7 +37,7 @@ public static partial class ArchiveParser
             }
         }
 
-        return new TodoArchive(exportedAt, lists);
+        return new TodoArchive(exportedAt, lists) { ReadNotes = document.ReadNotes };
     }
 
     private static TaskList ParseList(JsonObject entry, TimeZoneInfo zone)
@@ -76,6 +76,7 @@ public static partial class ArchiveParser
         {
             Id = Str(task, "id") ?? string.Empty,
             Title = (Str(task, "title") ?? string.Empty).Trim(),
+            IsPartial = Bool(task, ReadNotes.PartialMarker) ?? false,
             Notes = ParseBody(task["body"] as JsonObject),
             IsCompleted = string.Equals(Str(task, "status"), "completed", StringComparison.OrdinalIgnoreCase),
             Importance = ParseImportance(Str(task, "importance")),

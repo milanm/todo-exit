@@ -67,18 +67,17 @@
         <button type="button" class="button secondary" disabled="@Busy" @onclick="LoadSampleAsync">Try with sample data</button>
     </div>
 
+    @if (Settings.SignInConfigured)
+    {
+        <label class="check">
+            <input type="checkbox" @bind="_skipCompletedSteps" disabled="@Busy" />
+            Skip steps of completed tasks (faster for large accounts)
+        </label>
+    }
+
     @if (_state == State.Reading)
     {
-        <p class="status" role="status">
-            @if (_progress is { } p && p.ListsTotal > 0)
-            {
-                <span>Reading list @(Math.Min(p.ListsDone + 1, p.ListsTotal)) of @p.ListsTotal@(p.CurrentList is null ? "" : $" ({p.CurrentList})"). Tasks read so far: @p.TasksRead.</span>
-            }
-            else
-            {
-                <span>Reading your lists...</span>
-            }
-        </p>
+        <p class="status" role="status">@ProgressText</p>
         <button type="button" class="link-button" @onclick="Cancel">Cancel</button>
     }
 
@@ -154,9 +153,41 @@
         }
         else
         {
+            @if (!_report.ReadNotes.IsEmpty)
+            {
+                <h3>Could not be read from Microsoft Graph</h3>
+                <p>This applies to every format, the JSON archive included.</p>
+                @if (_report.ReadNotes.StepsForCompletedTasksSkipped)
+                {
+                    <p>Steps of completed tasks were not read, by choice.</p>
+                }
+                @if (_report.ReadNotes.Errors.Count > 0)
+                {
+                    <table class="table counts">
+                        <tbody>
+                            @foreach (var kind in _report.ReadNotes.Errors.GroupBy(e => e.Kind).OrderByDescending(k => k.Count()))
+                            {
+                                <tr><th scope="row">@ReadErrorText(kind.Key)</th><td>@kind.Count()</td></tr>
+                            }
+                        </tbody>
+                    </table>
+                    <details>
+                        <summary>Show each item</summary>
+                        <ul class="loss-list">
+                            @foreach (var e in _report.ReadNotes.Errors)
+                            {
+                                <li><span class="loss-where">@e.ListName@(e.TaskTitle is not null ? $" / {e.TaskTitle}" : e.Position is { } pos ? $" / task at position {pos}" : "")</span> @e.Message</li>
+                            }
+                        </ul>
+                    </details>
+                }
+            }
+
             @if (SelectedFormats.HasFlag(ExportFormats.Json))
             {
-                <p>The JSON archive keeps everything Microsoft Graph returned, so it has no losses.</p>
+                <p>@(_report.ReadNotes.Errors.Count == 0
+                    ? "The JSON archive keeps everything Microsoft Graph returned, so it has no losses."
+                    : "The JSON archive keeps everything Microsoft Graph returned. It lacks only what could not be read.")</p>
             }
 
             @foreach (var group in _report.Losses.GroupBy(l => l.Format))
@@ -209,6 +240,7 @@
     private bool _todoist = true;
     private bool _csv = true;
     private bool _includeCompleted;
+    private bool _skipCompletedSteps;
 
     private bool Busy => _state == State.Reading;
 
@@ -256,7 +288,7 @@
         try
         {
             var http = HttpFactory.CreateClient(AppSettings.GraphClientName);
-            var reader = new GraphTodoReader(http);
+            var reader = new GraphTodoReader(http) { IncludeStepsForCompletedTasks = !_skipCompletedSteps };
             var progress = new Progress<ReadProgress>(p =>
             {
                 _progress = p;
@@ -348,6 +380,37 @@
         var name = $"todo-exit-{DateTime.Now:yyyy-MM-dd}.zip";
         await JS.InvokeVoidAsync("todoExit.download", name, "application/zip", buffer.ToArray());
     }
+
+    private string ProgressText
+    {
+        get
+        {
+            if (_progress is not { } p)
+            {
+                return "Reading your lists...";
+            }
+
+            var list = p.ListsTotal > 0
+                ? $"list {Math.Min(p.ListsDone + 1, p.ListsTotal)} of {p.ListsTotal}{(p.CurrentList is null ? "" : $" ({p.CurrentList})")}"
+                : "your lists";
+            return p.Phase switch
+            {
+                ReadPhase.Lists => "Reading your lists...",
+                ReadPhase.Tasks => $"Reading tasks in {list}. Tasks read so far: {p.TasksRead}.",
+                ReadPhase.Steps => $"Reading steps in {list}: {p.StepsDone} of {p.StepsTotal} tasks done.",
+                _ => $"Reading attachment details in {list}.",
+            };
+        }
+    }
+
+    private static string ReadErrorText(string kind) => kind switch
+    {
+        ReadErrorKinds.TaskUnreadable => "Tasks that could not be read (skipped)",
+        ReadErrorKinds.TaskPartial => "Tasks read only in part",
+        ReadErrorKinds.StepsUnreadable => "Tasks whose steps could not be read",
+        ReadErrorKinds.AttachmentsUnreadable => "Tasks whose attachment details could not be read",
+        _ => kind,
+    };
 
     private static string FormatTitle(string format) => format switch
     {

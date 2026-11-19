@@ -13,9 +13,11 @@ public sealed record InventoryCounts(
     int WithReminders,
     int WithAttachments,
     int WithLinkedResources,
-    int SharedLists)
+    int SharedLists,
+    int Unreadable = 0,
+    int Partial = 0)
 {
-    public static InventoryCounts Empty { get; } = new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    public static InventoryCounts Empty { get; } = new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 
     public InventoryCounts Add(InventoryCounts other) => new(
         Lists + other.Lists,
@@ -28,7 +30,9 @@ public sealed record InventoryCounts(
         WithReminders + other.WithReminders,
         WithAttachments + other.WithAttachments,
         WithLinkedResources + other.WithLinkedResources,
-        SharedLists + other.SharedLists);
+        SharedLists + other.SharedLists,
+        Unreadable + other.Unreadable,
+        Partial + other.Partial);
 
     /// <summary>Row labels and values in display order.</summary>
     public IReadOnlyList<(string Label, int Value)> Rows() =>
@@ -44,6 +48,8 @@ public sealed record InventoryCounts(
         ("With attachments", WithAttachments),
         ("With linked resources", WithLinkedResources),
         ("Shared lists", SharedLists),
+        ("Unreadable (skipped)", Unreadable),
+        ("Partial", Partial),
     ];
 }
 
@@ -53,12 +59,15 @@ public sealed record Inventory(InventoryCounts Totals, IReadOnlyList<ListInvento
 {
     public static Inventory From(TodoArchive archive)
     {
-        var perList = archive.Lists.Select(l => new ListInventory(l.Name, Count(l))).ToList();
+        var unreadable = archive.ReadNotes.Errors.Where(e => e.Kind == ReadErrorKinds.TaskUnreadable).ToList();
+        var perList = archive.Lists
+            .Select(l => new ListInventory(l.Name, Count(l, unreadable.Count(e => e.ListId == l.Id))))
+            .ToList();
         var totals = perList.Aggregate(InventoryCounts.Empty, (acc, l) => acc.Add(l.Counts));
         return new Inventory(totals, perList);
     }
 
-    private static InventoryCounts Count(TaskList list)
+    private static InventoryCounts Count(TaskList list, int unreadable)
     {
         var tasks = list.Tasks;
         return new InventoryCounts(
@@ -72,6 +81,8 @@ public sealed record Inventory(InventoryCounts Totals, IReadOnlyList<ListInvento
             WithReminders: tasks.Count(t => t.Reminder is not null),
             WithAttachments: tasks.Count(t => t.Attachments.Count > 0),
             WithLinkedResources: tasks.Count(t => t.LinkedResources.Count > 0),
-            SharedLists: list.IsShared ? 1 : 0);
+            SharedLists: list.IsShared ? 1 : 0,
+            Unreadable: unreadable,
+            Partial: tasks.Count(t => t.IsPartial));
     }
 }

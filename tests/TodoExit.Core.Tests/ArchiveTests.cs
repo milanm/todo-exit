@@ -71,6 +71,55 @@ public class ArchiveTests
     }
 
     [Fact]
+    public void Read_notes_round_trip()
+    {
+        var notes = new ReadNotes(true,
+        [
+            new ReadError(ReadErrorKinds.TaskUnreadable, "L1", "Tasks", null, null, 9269, "broken"),
+            new ReadError(ReadErrorKinds.AttachmentsUnreadable, "L1", "Tasks", "T1", "Title", null, "500"),
+        ]);
+        var doc = TodoArchiveDocument.Create(DateTimeOffset.UnixEpoch, [new ArchivedList(TestData.List("Tasks"), [])], notes);
+        var text = doc.ToJsonString();
+        var reread = TodoArchiveDocument.Parse(text);
+
+        Assert.Equal(notes.StepsForCompletedTasksSkipped, reread.ReadNotes.StepsForCompletedTasksSkipped);
+        Assert.Equal(notes.Errors, reread.ReadNotes.Errors);
+        Assert.Equal(text, reread.ToJsonString());
+
+        var raw = JsonNode.Parse(text)!["readNotes"]!["errors"]![0]!.AsObject();
+        Assert.Equal(["kind", "listId", "listName", "taskId", "taskTitle", "position", "message"], raw.Select(p => p.Key));
+        Assert.Null(raw["taskId"]);
+        Assert.Equal(9269, (int)raw["position"]!);
+
+        var archive = ArchiveParser.Parse(reread, TimeZoneInfo.Utc);
+        Assert.Equal(2, archive.ReadNotes.Errors.Count);
+    }
+
+    [Fact]
+    public void Read_notes_are_omitted_when_empty_and_absent_archives_parse()
+    {
+        var doc = TodoArchiveDocument.Create(DateTimeOffset.UnixEpoch, [new ArchivedList(TestData.List("Tasks"), [])], new ReadNotes(false, []));
+        Assert.False(doc.Root.ContainsKey("readNotes"));
+        Assert.DoesNotContain("readNotes", doc.ToJsonString());
+
+        var sample = TodoArchiveDocument.Parse(Sample);
+        Assert.True(sample.ReadNotes.IsEmpty);
+        Assert.True(ArchiveParser.Parse(sample, TimeZoneInfo.Utc).ReadNotes.IsEmpty);
+        Assert.Equal(0, Inventory.From(ArchiveParser.Parse(sample, TimeZoneInfo.Utc)).Totals.Unreadable);
+    }
+
+    [Fact]
+    public void Malformed_read_notes_are_tolerated()
+    {
+        var json = Sample.Replace("\"someFutureField\"", "\"readNotes\": { \"errors\": [ { \"position\": \"x\" }, 5 ] }, \"someFutureField\"");
+        var doc = TodoArchiveDocument.Parse(json);
+        var error = Assert.Single(doc.ReadNotes.Errors);
+        Assert.Null(error.Position);
+        Assert.Equal("unknown", error.Kind);
+        Assert.Contains("\"position\": \"x\"", doc.ToJsonString());
+    }
+
+    [Fact]
     public void Create_writes_the_envelope()
     {
         var doc = TestData.Document((TestData.List("A"), [TestData.Task("t")]));

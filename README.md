@@ -41,9 +41,25 @@ Attachment content is never downloaded. If you need an attached file, open the t
 
 The report lists each loss by format, list and task, so you can fix the important ones by hand.
 
+### When Microsoft Graph cannot return something
+
+Sometimes Graph itself cannot return a task. On one real account, a single corrupt task made every page that contained it come back broken. todo-exit then narrows the page down until only that task is left, reads every other task, and tries to save at least the id and title of the broken one. Such a task is kept in the archive with `"todoExitPartial": true`. If even that fails, the task is skipped.
+
+All of this is recorded in a "Could not be read from Microsoft Graph" section at the top of `report.md`, and in `readErrors` in `report.json`. It applies to every format, including the JSON archive. The kinds are:
+
+| Kind | Meaning |
+|---|---|
+| `task-unreadable` | The task could not be read at all and is missing. The report gives its position in the list. |
+| `task-partial` | Only some properties of the task could be read. It is exported with what there is. |
+| `steps-unreadable` | The task's steps could not be read. |
+| `attachments-unreadable` | The list of attachment names could not be read. |
+
+If you used `--skip-completed-steps`, the report says so in one line.
+
 ## Privacy
 
 - todo-exit asks for one permission: `Tasks.Read`. It can read your tasks. It cannot change or delete them.
+- Every request it makes is read-only. Steps are read through Graph's batch endpoint (`POST /$batch`), which bundles up to 20 read requests into one call. The batch contains only reads.
 - The web app runs entirely in your browser. The only network requests it makes are to Microsoft Graph, from your browser. Your tasks are not sent to any other server.
 - The command-line tool runs on your computer and talks only to Microsoft Graph.
 - Neither tool stores your token. The CLI never prints it.
@@ -82,13 +98,17 @@ The full syntax:
 
 ```
 todo-exit inventory (--token <t> | --token-file <path> | --from-archive <file>) [--timezone <IANA id>]
+                    [--skip-completed-steps]
 todo-exit export    (--token <t> | --token-file <path> | --from-archive <file>) --out <dir>
                     [--formats json,markdown,todoist,csv] [--include-completed] [--timezone <IANA id>]
+                    [--skip-completed-steps]
 ```
 
 - `--from-archive` reads an `archive.json` written earlier, so you can export again later without signing in.
 - `--formats` defaults to all four. `report.md` and `report.json` are always written.
 - `--timezone` sets the zone used for due dates and reminders. It defaults to your computer's zone. Use the zone you used To Do in, otherwise due dates can shift by a day.
+- `--skip-completed-steps` does not read the steps of completed tasks. Steps need one read per task, so on an account with thousands of completed tasks this saves a lot of time. Completed tasks then have no steps in any format, and the report notes it.
+- While reading, the tool shows progress on one line, and when it is done it prints how many lists and tasks it read, how many read errors there were, and how long it took.
 - Exit codes: 0 on success, 1 for a usage error, 2 when the export fails.
 
 You can also install it as a .NET tool from a local build:
@@ -138,7 +158,9 @@ tests/TodoExit.Core.Tests unit tests for the core library
 docs/                     app registration guide
 ```
 
-The archive is the source of truth. The reader saves raw Graph JSON, and every other format is generated from that file. Properties the parser does not know about stay in the archive unchanged.
+The archive is the source of truth. The reader saves raw Graph JSON, and every other format is generated from that file. Properties the parser does not know about stay in the archive unchanged. When something could not be read, the archive has an extra `readNotes` property listing it.
+
+Known Graph behavior: Graph accepts `$expand=checklistItems` on the tasks collection but ignores it, so todo-exit reads steps per task through `$batch`.
 
 ## Roadmap
 

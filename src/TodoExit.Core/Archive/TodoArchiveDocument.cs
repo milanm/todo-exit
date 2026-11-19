@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using TodoExit.Core.Model;
 
 namespace TodoExit.Core.Archive;
 
@@ -32,8 +33,12 @@ public sealed class TodoArchiveDocument
 
     public JsonArray Lists => Root["lists"] as JsonArray ?? new JsonArray();
 
+    /// <summary>What the read could not get from Graph. Empty when the archive has no "readNotes" property.</summary>
+    public ReadNotes ReadNotes => ReadNotes.FromJson(Root[ReadNotes.PropertyName]);
+
     /// <summary>Creates a new archive from raw Graph objects.</summary>
-    public static TodoArchiveDocument Create(DateTimeOffset exportedAt, IEnumerable<ArchivedList> lists)
+    /// <param name="notes">Written as "readNotes" only when it has something to note.</param>
+    public static TodoArchiveDocument Create(DateTimeOffset exportedAt, IEnumerable<ArchivedList> lists, ReadNotes? notes = null)
     {
         var listArray = new JsonArray();
         foreach (var entry in lists)
@@ -56,8 +61,14 @@ public sealed class TodoArchiveDocument
             ["format"] = FormatName,
             ["version"] = CurrentVersion,
             ["exportedAt"] = exportedAt.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
-            ["lists"] = listArray,
         };
+
+        if (notes is { IsEmpty: false })
+        {
+            root[ReadNotes.PropertyName] = notes.ToJson();
+        }
+
+        root["lists"] = listArray;
         return new TodoArchiveDocument(root);
     }
 

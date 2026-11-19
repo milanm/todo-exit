@@ -48,7 +48,7 @@ public static class ExportService
             .Select(x => x.loss)
             .ToList();
 
-        var report = new LossReport(Inventory.From(archive), ordered, options.Formats);
+        var report = new LossReport(Inventory.From(archive), ordered, options.Formats) { ReadNotes = archive.ReadNotes };
         files.AddRange(report.ToFiles());
         return new ExportResult(files, report);
     }

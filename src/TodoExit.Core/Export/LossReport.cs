@@ -2,12 +2,16 @@ using System.Globalization;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using TodoExit.Core.Model;
 
 namespace TodoExit.Core.Export;
 
 /// <summary>What one export run could not carry over, plus the inventory it started from.</summary>
 public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses, ExportFormats Formats)
 {
+    /// <summary>What could not be read from Microsoft Graph. Applies to every format, the archive included.</summary>
+    public ReadNotes ReadNotes { get; init; } = ReadNotes.Empty;
+
     public const string JsonFileName = "report.json";
     public const string MarkdownFileName = "report.md";
 
@@ -37,6 +41,8 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
             w.WriteNumber("withAttachments", c.WithAttachments);
             w.WriteNumber("withLinkedResources", c.WithLinkedResources);
             w.WriteNumber("sharedLists", c.SharedLists);
+            w.WriteNumber("unreadable", c.Unreadable);
+            w.WriteNumber("partial", c.Partial);
             w.WriteEndObject();
 
             w.WriteStartArray("losses");
@@ -60,6 +66,31 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
             }
 
             w.WriteEndArray();
+
+            w.WriteStartArray("readErrors");
+            foreach (var e in ReadNotes.Errors)
+            {
+                w.WriteStartObject();
+                w.WriteString("kind", e.Kind);
+                WriteNullable(w, "listId", e.ListId);
+                WriteNullable(w, "listName", e.ListName);
+                WriteNullable(w, "taskId", e.TaskId);
+                WriteNullable(w, "taskTitle", e.TaskTitle);
+                if (e.Position is { } position)
+                {
+                    w.WriteNumber("position", position);
+                }
+                else
+                {
+                    w.WriteNull("position");
+                }
+
+                w.WriteString("message", e.Message);
+                w.WriteEndObject();
+            }
+
+            w.WriteEndArray();
+            w.WriteBoolean("stepsForCompletedTasksSkipped", ReadNotes.StepsForCompletedTasksSkipped);
             w.WriteEndObject();
         }
 
@@ -77,11 +108,15 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
             sb.Append("| ").Append(label).Append(" | ").Append(value.ToString(CultureInfo.InvariantCulture)).Append(" |\n");
         }
 
+        AppendReadErrors(sb);
+
         sb.Append("\n## What was not carried over\n\n");
         var requested = FormatOrder.Where(IsRequested).ToList();
         if (requested.Contains(ExportFormatNames.Json))
         {
-            sb.Append("The JSON archive (`archive.json`) keeps everything Microsoft Graph returned. It has no losses.\n\n");
+            sb.Append(ReadNotes.Errors.Count == 0
+                ? "The JSON archive (`archive.json`) keeps everything Microsoft Graph returned. It has no losses.\n\n"
+                : "The JSON archive (`archive.json`) keeps everything Microsoft Graph returned. It has no losses of its own, but it lacks what could not be read (see above).\n\n");
         }
 
         var formats = requested.Where(f => f != ExportFormatNames.Json).ToList();
@@ -126,6 +161,66 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
         }
 
         return sb.ToString();
+    }
+
+    private void AppendReadErrors(StringBuilder sb)
+    {
+        if (ReadNotes.IsEmpty)
+        {
+            return;
+        }
+
+        sb.Append("\n## Could not be read from Microsoft Graph\n\n");
+        sb.Append("This applies to every format, the JSON archive included.\n\n");
+        if (ReadNotes.StepsForCompletedTasksSkipped)
+        {
+            sb.Append("Steps of completed tasks were not read, by choice (--skip-completed-steps). Completed tasks have no steps in this export.\n\n");
+        }
+
+        if (ReadNotes.Errors.Count == 0)
+        {
+            return;
+        }
+
+        sb.Append("| Kind | Count |\n|---|---:|\n");
+        foreach (var group in ReadNotes.Errors.GroupBy(e => e.Kind).OrderByDescending(g => g.Count()).ThenBy(g => g.Key, StringComparer.Ordinal))
+        {
+            sb.Append("| ").Append(group.Key).Append(" | ").Append(group.Count().ToString(CultureInfo.InvariantCulture)).Append(" |\n");
+        }
+
+        sb.Append('\n');
+        foreach (var byList in ReadNotes.Errors.GroupBy(e => e.ListName ?? e.ListId ?? "(unknown list)"))
+        {
+            sb.Append("#### ").Append(byList.Key).Append("\n\n");
+            foreach (var e in byList)
+            {
+                sb.Append("- ");
+                if (e.TaskTitle is not null)
+                {
+                    sb.Append("**").Append(EscapeInline(e.TaskTitle)).Append("**: ");
+                }
+                else if (e.Position is { } position)
+                {
+                    sb.Append("**Task at position ").Append(position.ToString(CultureInfo.InvariantCulture)).Append("**: ");
+                }
+
+                sb.Append(EscapeInline(e.Message)).Append(" (`").Append(e.Kind).Append("`)\n");
+            }
+
+            sb.Append('\n');
+        }
+    }
+
+    private static void WriteNullable(Utf8JsonWriter w, string name, string? value)
+    {
+        if (value is null)
+        {
+            w.WriteNull(name);
+        }
+        else
+        {
+            w.WriteString(name, value);
+        }
     }
 
     public IReadOnlyList<ExportFile> ToFiles() =>
