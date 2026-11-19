@@ -32,6 +32,11 @@ jobs:
           # The site lives under /todo-exit/, so the base href must say so.
           sed -i 's|<base href="/" />|<base href="/todo-exit/" />|' index.html
           grep -q '<base href="/todo-exit/" />' index.html
+          # The Content Security Policy must be there and must not allow inline scripts.
+          grep -q '<meta http-equiv="Content-Security-Policy" content="default-src' index.html
+          if grep -q "unsafe-inline\|<script>\|<script type=\"importmap\">" index.html; then
+            echo "index.html has an inline script or allows unsafe-inline"; exit 1
+          fi
           # The precompressed copies still hold the old base href; Pages does not use them, so drop them.
           rm -f index.html.br index.html.gz
           # SPA fallback: /todo-exit/authentication/login-callback and other routes load the app.

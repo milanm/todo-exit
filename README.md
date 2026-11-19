@@ -65,10 +65,10 @@ Kinds that apply to many tasks at once (completed tasks left out, attachments, c
 - Signing in also uses the standard sign-in scopes (`openid`, `profile`, `offline_access`), so Microsoft's consent screen can list your basic profile and keeping access next to the tasks permission. Keeping access is what lets a long read renew its token. The only profile data todo-exit uses is the account name the web app shows after sign-in.
 - Every request it makes is read-only. Steps come with the task pages. Attachment details (and the extra step check of `--verify-steps`) are read through Graph's batch endpoint (`POST /$batch`), which bundles up to 20 read requests into one call. The batch contains only reads.
 - It does not ask for write access. That is why attachment file names are missing on personal accounts (see above).
-- The web app runs entirely in your browser. It talks to Microsoft only: the sign-in service to sign you in, and Microsoft Graph to read your tasks. Your tasks are sent to no other server.
+- The web app runs entirely in your browser. It talks to Microsoft only: the sign-in service to sign you in, and Microsoft Graph to read your tasks. Your tasks are sent to no other server. The page's Content Security Policy makes the browser enforce that: requests to any host other than the site itself, `login.microsoftonline.com` and `graph.microsoft.com` are blocked.
 - The command-line tool runs on your computer and talks to the same two Microsoft services, nothing else.
 - The command-line tool keeps your sign-in in memory only. It sends the access token to `graph.microsoft.com` only, and never prints it or writes it to disk.
-- The web app keeps your sign-in in the browser tab's session storage, which is how Microsoft's sign-in library works. It is gone when you sign out or close the tab.
+- The web app keeps your sign-in in the browser tab's session storage, which is how Microsoft's sign-in library works. It is gone when you sign out or close the tab. Sign out also signs your Microsoft account out of that browser and leaves you on Microsoft's page.
 - The source code is in this repository, so you can check all of the above.
 
 ## Run the command-line tool
@@ -164,7 +164,7 @@ You only need this to work on the code or to host your own copy. Otherwise use h
 dotnet run --project src/TodoExit.Web
 ```
 
-Then open the URL it prints. "Try with sample data" works without any setup and loads a fictional account from `wwwroot/sample/sample-archive.json`.
+Then open the URL it prints. Hot reload under `dotnet watch` does not work, because the Content Security Policy blocks its websocket. "Try with sample data" works without any setup and loads a fictional account from `wwwroot/sample/sample-archive.json`.
 
 Sign-in uses the app registration whose client ID is in `src/TodoExit.Web/wwwroot/appsettings.json`. Its redirect URIs must include the address you run the app at; see [docs/entra-app-registration.md](docs/entra-app-registration.md). Without a client ID the page hides the sign-in button.
 
@@ -215,7 +215,6 @@ These are observations from that one account in November 2026, and they shaped t
 - Phase 2: transfer tasks directly to Todoist through its API, including completed tasks and reminders where the API allows.
 - Ready-made executables for Windows, macOS and Linux, so the command-line tool does not need the .NET SDK.
 - Rules like "the last Sunday of October" (`relativeYearly`) are still written as `every year` with a note in the report.
-- A Content Security Policy for the web app, so the browser itself blocks requests to any other server.
 
 ## Not affiliated
 

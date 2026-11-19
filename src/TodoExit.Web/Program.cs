@@ -1,11 +1,15 @@
 using Microsoft.AspNetCore.Components.Web;
 using Microsoft.AspNetCore.Components.WebAssembly.Authentication;
 using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
+using Microsoft.Extensions.Logging;
 using TodoExit.Web;
 
 var builder = WebAssemblyHostBuilder.CreateDefault(args);
 builder.RootComponents.Add<App>("#app");
 builder.RootComponents.Add<HeadOutlet>("head::after");
+
+// The default level (Information) prints every Graph request URL, with list and task IDs, to the browser console.
+builder.Logging.SetMinimumLevel(LogLevel.Warning);
 
 // Plain client for files served with the app (the sample archive).
 builder.Services.AddScoped(_ => new HttpClient { BaseAddress = new Uri(builder.HostEnvironment.BaseAddress) });
