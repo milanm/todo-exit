@@ -529,6 +529,7 @@
         ReadErrorKinds.StepsUnreadable => "Tasks whose steps could not be read",
         ReadErrorKinds.AttachmentsUnreadable => "Tasks whose attachment details could not be read",
         ReadErrorKinds.AttachmentsDenied => "Attachment names refused by Microsoft Graph (read-only access)",
+        ReadErrorKinds.ListChanged => "Lists that changed while they were read (read your tasks again)",
         _ => kind,
     };
 

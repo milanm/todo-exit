@@ -96,6 +96,9 @@ internal sealed class FakeGraph : HttpMessageHandler
 
     public void RemoveList(string id) => _lists.RemoveAll(l => l.Id == id);
 
+    /// <summary>The lists as they are now; tests change their tasks to model edits in To Do.</summary>
+    public IReadOnlyList<FakeList> AddedLists => _lists;
+
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         var url = request.RequestUri!.ToString();

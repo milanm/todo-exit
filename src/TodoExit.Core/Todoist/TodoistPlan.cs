@@ -295,9 +295,18 @@ public static class TodoistPlanner
                 available = Math.Max(0, maxProjects - account.CountedProjects);
             }
 
+            // The transfer creates personal projects. A team project with the same name does not stop it: Todoist shows
+            // it under its team, and id recovery only considers personal projects that did not exist before.
             var ours = state?.Ids.Values.ToHashSet(StringComparer.Ordinal) ?? new HashSet<string>(StringComparer.Ordinal);
-            var existing = account.Projects.Where(p => !ours.Contains(p.Id)).Select(p => p.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var existing = account.Projects.Where(p => !ours.Contains(p.Id) && p.IsPersonal).Select(p => p.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var team = account.Projects.Where(p => !ours.Contains(p.Id) && !p.IsPersonal).Select(p => p.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var sameName = notSent.Where(p => existing.Contains(p.Name)).Select(p => p.Name).ToList();
+            var sameAsTeam = notSent.Where(p => team.Contains(p.Name) && !existing.Contains(p.Name)).Select(p => p.Name).ToList();
+            if (sameAsTeam.Count > 0)
+            {
+                warnings.Add($"New personal projects will have the same name as team projects: {string.Join(", ", sameAsTeam.Select(n => $"\"{n}\""))}.");
+            }
+
             if (sameName.Count > 0 && !settings.AllowDuplicateNames)
             {
                 clashes = sameName;

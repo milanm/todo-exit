@@ -431,7 +431,9 @@ public class TodoistTransferTests
         var second = await Transfer(archive, fake, state: TodoistTransferState.Parse(first.Saves[^1]));
         Assert.Equal(TransferStatus.Completed, second.Result.Status);
         AssertEachOnce(fake, 120, 3);
-        Assert.DoesNotContain(fake.Requests, r => r.Form.TryGetValue("resource_types", out var t) && t.Contains("items"));
+        // Only the sync_token read before the first write; no id recovery read.
+        Assert.Single(fake.Requests, r => r.Form.TryGetValue("resource_types", out var t) && t.Contains("items"));
+        Assert.DoesNotContain(fake.Requests, r => r.Form.TryGetValue("sync_token", out var t) && t != "*");
     }
 
     [Fact]

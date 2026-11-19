@@ -330,7 +330,7 @@ public sealed partial class SendToTodoist : IDisposable
     {
         var list = p.CurrentList is null ? string.Empty : $" (list \"{p.CurrentList}\")";
         return p.Waiting is { } wait
-            ? $"Todoist did not answer ({p.WaitingReason}). Trying again in {Math.Ceiling(wait.TotalSeconds)} seconds. {p.CommandsDone} of {p.CommandsTotal} commands done."
+            ? $"Waiting for Todoist ({p.WaitingReason}). Trying again in {Math.Ceiling(wait.TotalSeconds)} seconds. {p.CommandsDone} of {p.CommandsTotal} commands done."
             : $"Sending to Todoist: {p.CommandsDone} of {p.CommandsTotal} commands done{list}.";
     }
 

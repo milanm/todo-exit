@@ -70,6 +70,22 @@ public sealed class TodoistTransferState
     /// <summary>Task keys that got a reminder.</summary>
     public HashSet<string> Reminders { get; init; } = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// sync_token taken before the first write. Id recovery reads what changed since it, so it sees every object this
+    /// transfer created however stale a full sync is. Null in a state saved by an earlier version.
+    /// </summary>
+    public string? SyncToken { get; set; }
+
+    /// <summary>full_sync_date_utc of the read that gave <see cref="SyncToken"/>, for the record.</summary>
+    public string? SyncTokenDate { get; set; }
+
+    /// <summary>
+    /// Base uuid of a command to the number of times Todoist answered it with an error that does not end it (a
+    /// temporary error, or its parent was not created in the same request). Each new attempt uses a new uuid and temp_id
+    /// derived from this number, so an answer Todoist may remember for the old uuid cannot block it.
+    /// </summary>
+    public Dictionary<string, int> Attempts { get; init; } = new(StringComparer.Ordinal);
+
     /// <summary>Set after the first PREMIUM_ONLY answer to a reminder; later reminders are not sent.</summary>
     public bool RemindersRefused { get; set; }
 
@@ -96,6 +112,24 @@ public sealed class TodoistTransferState
 
     public string TempId(string key) => DeriveUuid(TransferId, "temp_id", key);
 
+    /// <summary>How many attempts of the command with this base uuid ended in an error that is retried.</summary>
+    public int Attempt(string baseUuid) => Attempts.TryGetValue(baseUuid, out var n) ? n : 0;
+
+    /// <summary>The uuid the command is sent with now: the base uuid on the first attempt.</summary>
+    public string WireUuid(string commandType, string key)
+    {
+        var baseUuid = Uuid(commandType, key);
+        var n = Attempt(baseUuid);
+        return n == 0 ? baseUuid : DeriveUuid(TransferId, commandType + "#" + n.ToString(CultureInfo.InvariantCulture), key);
+    }
+
+    /// <summary>The temp_id the command with this base uuid uses now for <paramref name="tempKey"/>.</summary>
+    public string WireTempId(string baseUuid, string tempKey)
+    {
+        var n = Attempt(baseUuid);
+        return n == 0 ? TempId(tempKey) : DeriveUuid(TransferId, "temp_id#" + n.ToString(CultureInfo.InvariantCulture), tempKey);
+    }
+
     public byte[] ToUtf8Bytes()
     {
         var root = new JsonObject
@@ -110,6 +144,8 @@ public sealed class TodoistTransferState
             ["todoistEmail"] = TodoistEmail,
             ["finished"] = Finished,
             ["remindersRefused"] = RemindersRefused,
+            ["syncToken"] = SyncToken,
+            ["syncTokenDate"] = SyncTokenDate,
             ["preexistingProjectIds"] = Array(PreexistingProjectIds.Order(StringComparer.Ordinal)),
             ["ids"] = new JsonObject(Ids.Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)JsonValue.Create(kv.Value)))),
             ["pending"] = Array(Pending),
@@ -119,6 +155,8 @@ public sealed class TodoistTransferState
             ["reminders"] = Array(Reminders.Order(StringComparer.Ordinal)),
             ["done"] = Array(Done.Order(StringComparer.Ordinal)),
             ["sent"] = Array(Sent.Order(StringComparer.Ordinal)),
+            ["attempts"] = new JsonObject(Attempts.OrderBy(kv => kv.Key, StringComparer.Ordinal)
+                .Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)JsonValue.Create(kv.Value)))),
         };
 
         var errors = new JsonArray();
@@ -191,6 +229,8 @@ public sealed class TodoistTransferState
             TodoistEmail = Str(root, "todoistEmail"),
             Finished = root["finished"] is JsonValue f && f.TryGetValue<bool>(out var fin) && fin,
             RemindersRefused = root["remindersRefused"] is JsonValue r && r.TryGetValue<bool>(out var rr) && rr,
+            SyncToken = Str(root, "syncToken") is { Length: > 0 } syncToken ? syncToken : null,
+            SyncTokenDate = Str(root, "syncTokenDate"),
             PreexistingProjectIds = Set(root["preexistingProjectIds"]),
             Ids = Map(root["ids"]),
             Pending = Set(root["pending"]).ToList(),
@@ -201,6 +241,17 @@ public sealed class TodoistTransferState
             Done = Set(root["done"]),
             Sent = Set(root["sent"]),
         };
+
+        if (root["attempts"] is JsonObject attempts)
+        {
+            foreach (var (k, v) in attempts)
+            {
+                if (v is JsonValue value && value.TryGetValue<int>(out var n) && n > 0)
+                {
+                    state.Attempts[k] = n;
+                }
+            }
+        }
 
         // Keep the pending order as written.
         state.Pending.Clear();

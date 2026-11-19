@@ -137,6 +137,7 @@ public static class LossCatalog
         ReadErrorKinds.StepsUnreadable => "The steps of the task could not be read.",
         ReadErrorKinds.AttachmentsUnreadable => "The attachment names of the task could not be read.",
         ReadErrorKinds.AttachmentsDenied => "Graph refused to list attachments with read-only access; tasks with attachments are still marked.",
+        ReadErrorKinds.ListChanged => "The list changed while it was read; tasks may be missing or out of date. Read your tasks again.",
         _ => kind,
     };
 

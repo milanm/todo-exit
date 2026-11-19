@@ -54,10 +54,14 @@ public sealed record TransferCounts(int Projects, int Tasks, int SubTasks, int C
 /// references to earlier requests use the real ids from the state.
 /// </summary>
 /// <remarks>
-/// Before a request is sent, its uuids are saved as Pending. A response that never arrives leaves them there, and
-/// the next attempt (or a resumed run) sends exactly those commands again with the same uuids and temp_ids. Todoist
-/// answers "ok" without new objects for commands it already ran, and without their temp_id_mapping; the missing ids
-/// are then found by reading the account's projects and active tasks.
+/// Before the first write, a sync_token is taken. Before a request is sent, its uuids are saved as Pending. A response
+/// that never arrives leaves them there, and the next attempt (or a resumed run) sends exactly those commands again
+/// with the same uuids and temp_ids. Todoist answers "ok" without new objects for commands it already ran, and without
+/// their temp_id_mapping; the missing ids are then found in what changed since the sync_token. An id that is not found
+/// stays unknown: the run ends interrupted, and what depends on it waits for a resumed run.
+/// A command that Todoist answers with a temporary error (http_code 408, 429 or 5xx) is sent again after a wait, with a
+/// new uuid, a few times per run; before that, the account is read in case Todoist ran it anyway. If it still fails, the
+/// run ends interrupted with the command, and everything that depends on it, left for a resumed run.
 /// </remarks>
 public static class TodoistTransfer
 {
@@ -68,6 +72,12 @@ public static class TodoistTransfer
 
     /// <summary>A command for an item that never got a status is sent again at most this many times.</summary>
     private const int MaxMissingStatus = 3;
+
+    /// <summary>A command that failed with a temporary error is sent again at most this many times per run.</summary>
+    internal const int MaxTemporaryRetries = 4;
+
+    /// <summary>When created objects are not found, the account is read again at most this many times, with waits.</summary>
+    internal const int MaxRecoveryRereads = 5;
 
     internal sealed record PlannedCommand(string Type, string Key, string Uuid, PlannedProject Project, PlannedItem? Item)
     {
@@ -198,19 +208,47 @@ public static class TodoistTransfer
                 await save(state, CancellationToken.None).ConfigureAwait(false);
             }
 
-            if (state.Unresolved.Count > 0)
+            if (state.SyncToken is null && state.Sent.Count == 0 && commands.Any(c => !state.Done.Contains(c.Uuid)))
             {
-                await RecoverAsync(plan, state, client, cancellationToken).ConfigureAwait(false);
+                // Before the first write: id recovery later reads what changed since this point.
+                var start = await client.ReadSyncTokenAsync(cancellationToken).ConfigureAwait(false);
+                state.SyncToken = start.SyncToken;
+                state.SyncTokenDate = start.FullSyncDateUtc;
                 await save(state, CancellationToken.None).ConfigureAwait(false);
             }
 
+            // In this run only: temporary failures per command, commands that used up their retries, and keys that
+            // were already searched for with patience (each new unknown id gets one patient search per run).
+            var tries = new Dictionary<string, int>(StringComparer.Ordinal);
+            var held = new HashSet<string>(StringComparer.Ordinal);
+            var searched = new HashSet<string>(StringComparer.Ordinal);
+            if (state.Unresolved.Count > 0)
+            {
+                await ResolveAsync(plan, state, client, [], MaxRecoveryRereads, cancellationToken).ConfigureAwait(false);
+                searched.UnionWith(state.Unresolved);
+                await save(state, CancellationToken.None).ConfigureAwait(false);
+            }
+
+            string? lastTemporary = null;
             Report();
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var batch = NextBatch(commands, state);
+                var batch = NextBatch(commands, state, held);
                 if (batch.Count == 0)
                 {
+                    if (state.Unresolved.Count > 0)
+                    {
+                        // Time has passed since the last search: look once more, and go on if anything was found.
+                        var before = state.Unresolved.Count;
+                        await ResolveAsync(plan, state, client, [], 0, cancellationToken).ConfigureAwait(false);
+                        await save(state, CancellationToken.None).ConfigureAwait(false);
+                        if (state.Unresolved.Count < before)
+                        {
+                            continue;
+                        }
+                    }
+
                     break;
                 }
 
@@ -225,16 +263,53 @@ public static class TodoistTransfer
                 await save(state, CancellationToken.None).ConfigureAwait(false);
 
                 var result = await client.ExecuteAsync(wire, cancellationToken).ConfigureAwait(false);
-                Apply(batch, result, state, missing);
+                var outcome = Apply(batch, result, state, missing);
                 state.Pending.Clear();
-                if (state.Unresolved.Count > 0)
+                await save(state, CancellationToken.None).ConfigureAwait(false);
+
+                var retry = new List<(PlannedCommand Command, TodoistCommandResult Status)>();
+                foreach (var (c, status) in outcome.Temporary)
                 {
-                    await save(state, CancellationToken.None).ConfigureAwait(false);
-                    await RecoverAsync(plan, state, client, cancellationToken).ConfigureAwait(false);
+                    lastTemporary = Describe(status);
+                    tries[c.Uuid] = tries.GetValueOrDefault(c.Uuid) + 1;
+                    if (tries[c.Uuid] > MaxTemporaryRetries)
+                    {
+                        held.Add(c.Uuid);
+                    }
+                    else
+                    {
+                        retry.Add((c, status));
+                    }
                 }
 
-                await save(state, CancellationToken.None).ConfigureAwait(false);
+                if (retry.Count > 0)
+                {
+                    var wait = retry.Select(r => r.Status.RetryAfter ?? TimeSpan.Zero)
+                        .Append(TodoistClient.Backoff(retry.Max(r => tries[r.Command.Uuid])))
+                        .Max();
+                    await client.WaitAsync(wait,
+                        $"{TodoistPlanText.Count(retry.Count, "command", "commands")} failed for now: {Describe(retry[0].Status)}",
+                        cancellationToken).ConfigureAwait(false);
+                }
+
+                // Commands sent again with a new uuid: Todoist may have run them despite the error, so look first.
+                var again = outcome.Temporary.Select(t => t.Command).Concat(outcome.Blocked).ToHashSet();
+                var check = batch.Where(again.Contains).ToList();
+                var unsearched = state.Unresolved.Any(k => !searched.Contains(k));
+                if (unsearched || check.Count > 0)
+                {
+                    await ResolveAsync(plan, state, client, check, unsearched ? MaxRecoveryRereads : 0, cancellationToken).ConfigureAwait(false);
+                    searched.UnionWith(state.Unresolved);
+                    await save(state, CancellationToken.None).ConfigureAwait(false);
+                }
+
                 Report();
+            }
+
+            if (commands.Any(c => !state.Done.Contains(c.Uuid)) || state.Unresolved.Count > 0)
+            {
+                await save(state, CancellationToken.None).ConfigureAwait(false);
+                return new TodoistTransferResult(TransferStatus.Interrupted, NotFinishedMessage(commands, state, held, lastTemporary));
             }
 
             state.Finished = true;
@@ -314,9 +389,11 @@ public static class TodoistTransfer
 
     /// <summary>
     /// The next request: the pending commands when a request is in doubt, otherwise up to 100 commands in order.
-    /// Commands whose project or parent failed are marked done and reported here.
+    /// Commands whose project or parent failed are marked done and reported here. Commands whose project or parent
+    /// has no id yet (it failed for now, or Todoist confirmed it but its id is not found yet) wait, and so do the
+    /// commands in <paramref name="held"/>.
     /// </summary>
-    internal static List<PlannedCommand> NextBatch(List<PlannedCommand> commands, TodoistTransferState state)
+    internal static List<PlannedCommand> NextBatch(List<PlannedCommand> commands, TodoistTransferState state, IReadOnlySet<string>? held = null)
     {
         if (state.Pending.Count > 0)
         {
@@ -339,16 +416,21 @@ public static class TodoistTransfer
                 break;
             }
 
-            if (state.Done.Contains(c.Uuid))
+            if (state.Done.Contains(c.Uuid) || held?.Contains(c.Uuid) == true)
             {
                 continue;
             }
 
-            var blocked = c.Dependencies.FirstOrDefault(d => !inBatch.Contains(d) && !HasId(state, d));
-            if (blocked is not null)
+            var missingDependency = c.Dependencies.FirstOrDefault(d => !inBatch.Contains(d) && !HasId(state, d));
+            if (missingDependency is not null)
             {
-                Skip(c, blocked, state);
-                continue;
+                if (state.Failed.ContainsKey(missingDependency) || state.Ids.ContainsKey(missingDependency))
+                {
+                    // Failed for good, or known to have no usable id (completed before its id was found).
+                    Skip(c, missingDependency, state);
+                }
+
+                continue; // otherwise wait until the dependency has an id
             }
 
             if (c.Type == ReminderAdd && state.RemindersRefused)
@@ -389,9 +471,9 @@ public static class TodoistTransfer
     /// <summary>Turns planned commands into wire commands. Deterministic for a given plan and state.</summary>
     internal static List<TodoistCommand> Wire(List<PlannedCommand> batch, TodoistTransferState state)
     {
-        var created = batch.Where(c => c.Creates).Select(c => c.Key).ToHashSet(StringComparer.Ordinal);
-        string Ref(string key) => HasId(state, key) ? state.Ids[key] : created.Contains(key)
-            ? state.TempId(key)
+        var created = batch.Where(c => c.Creates).ToDictionary(c => c.Key, StringComparer.Ordinal);
+        string Ref(string key) => HasId(state, key) ? state.Ids[key] : created.TryGetValue(key, out var creator)
+            ? TempIdOf(creator, state)
             : throw new InvalidOperationException($"No id for {key}.");
 
         var wire = new List<TodoistCommand>();
@@ -400,7 +482,7 @@ public static class TodoistTransfer
             switch (c.Type)
             {
                 case ProjectAdd:
-                    wire.Add(new TodoistCommand(ProjectAdd, c.Uuid, state.TempId(c.Key), new JsonObject { ["name"] = c.Project.Name }));
+                    wire.Add(new TodoistCommand(ProjectAdd, WireUuid(c, state), TempIdOf(c, state), new JsonObject { ["name"] = c.Project.Name }));
                     break;
                 case ItemAdd:
                 {
@@ -432,7 +514,7 @@ public static class TodoistTransfer
                         args["due"] = new JsonObject { ["date"] = date };
                     }
 
-                    wire.Add(new TodoistCommand(ItemAdd, c.Uuid, state.TempId(c.Key), args));
+                    wire.Add(new TodoistCommand(ItemAdd, WireUuid(c, state), TempIdOf(c, state), args));
                     break;
                 }
 
@@ -444,12 +526,12 @@ public static class TodoistTransfer
                         args["date_completed"] = Utc(at);
                     }
 
-                    wire.Add(new TodoistCommand(ItemComplete, c.Uuid, null, args));
+                    wire.Add(new TodoistCommand(ItemComplete, WireUuid(c, state), null, args));
                     break;
                 }
 
                 case ReminderAdd:
-                    wire.Add(new TodoistCommand(ReminderAdd, c.Uuid, state.TempId("reminder:" + c.Key), new JsonObject
+                    wire.Add(new TodoistCommand(ReminderAdd, WireUuid(c, state), TempIdOf(c, state), new JsonObject
                     {
                         ["item_id"] = Ref(c.Key),
                         ["type"] = "absolute",
@@ -462,15 +544,34 @@ public static class TodoistTransfer
         return wire;
     }
 
+    /// <summary>The uuid a command is sent with now. The first attempt uses its base uuid.</summary>
+    internal static string WireUuid(PlannedCommand c, TodoistTransferState state) => state.WireUuid(c.Type, c.Key);
+
+    /// <summary>The temp_id a creating command (or a reminder) is sent with now.</summary>
+    internal static string TempIdOf(PlannedCommand c, TodoistTransferState state) =>
+        state.WireTempId(c.Uuid, c.Type == ReminderAdd ? "reminder:" + c.Key : c.Key);
+
     /// <summary>"2024-03-05T10:00:00.000000Z", the format Todoist accepted for date_completed.</summary>
     internal static string Utc(DateTimeOffset at) =>
         at.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'.000000Z'", CultureInfo.InvariantCulture);
 
-    private static void Apply(List<PlannedCommand> batch, TodoistSyncResult result, TodoistTransferState state, Dictionary<string, int> missing)
+    /// <summary>What one answer left to do: commands that failed for now, and commands whose parent was not created.</summary>
+    internal sealed record ApplyOutcome(
+        List<(PlannedCommand Command, TodoistCommandResult Status)> Temporary,
+        List<PlannedCommand> Blocked);
+
+    /// <remarks>
+    /// Three outcomes per command: "ok"; refused for good (reported, children skipped); not done yet. Not done yet is
+    /// a temporary error (http_code 408, 429 or 5xx), or any error of a command whose project or parent has no id
+    /// after this answer: that parent failed for now in the same request, so the child could not run. Such commands
+    /// are not marked done and get a new uuid for their next attempt.
+    /// </remarks>
+    private static ApplyOutcome Apply(List<PlannedCommand> batch, TodoistSyncResult result, TodoistTransferState state, Dictionary<string, int> missing)
     {
+        var outcome = new ApplyOutcome([], []);
         foreach (var c in batch)
         {
-            if (!result.Status.TryGetValue(c.Uuid, out var status))
+            if (!result.Status.TryGetValue(WireUuid(c, state), out var status))
             {
                 // No status: send it again (same uuid, so it cannot run twice), but not forever.
                 missing[c.Uuid] = missing.GetValueOrDefault(c.Uuid) + 1;
@@ -482,13 +583,13 @@ public static class TodoistTransfer
                 status = new TodoistCommandResult(false, "NO_STATUS", null, "Todoist did not report a result for this command.");
             }
 
-            state.Done.Add(c.Uuid);
             if (status.Ok)
             {
+                state.Done.Add(c.Uuid);
                 switch (c.Type)
                 {
                     case ProjectAdd or ItemAdd:
-                        if (result.TempIdMapping.TryGetValue(state.TempId(c.Key), out var id) && id.Length > 0)
+                        if (result.TempIdMapping.TryGetValue(TempIdOf(c, state), out var id) && id.Length > 0)
                         {
                             state.Ids[c.Key] = id;
                         }
@@ -509,6 +610,21 @@ public static class TodoistTransfer
                 continue;
             }
 
+            if (c.Dependencies.Any(d => !HasId(state, d) && !state.Failed.ContainsKey(d) && !state.Ids.ContainsKey(d)))
+            {
+                outcome.Blocked.Add(c);
+                state.Attempts[c.Uuid] = state.Attempt(c.Uuid) + 1;
+                continue;
+            }
+
+            if (status.IsTemporary)
+            {
+                outcome.Temporary.Add((c, status));
+                state.Attempts[c.Uuid] = state.Attempt(c.Uuid) + 1;
+                continue;
+            }
+
+            state.Done.Add(c.Uuid);
             var tag = status.ErrorTag ?? "UNKNOWN";
             var message = status.Error ?? "no message";
             switch (c.Type)
@@ -547,76 +663,241 @@ public static class TodoistTransfer
                     break;
             }
         }
+
+        return outcome;
     }
 
     /// <summary>
-    /// Finds the ids of objects Todoist acknowledged without a temp_id_mapping entry (a request sent again after
-    /// a lost response). Reads all projects and active tasks; matches projects by name among those that existed
-    /// neither before the transfer nor in the state, and tasks by project, parent and content in creation order.
-    /// Completed tasks are not listed by Todoist; their ids are not needed any more.
+    /// Finds ids Todoist did not deliver, and commands it ran although it answered them with an error.
     /// </summary>
-    internal static async Task RecoverAsync(TodoistPlan plan, TodoistTransferState state, TodoistClient client, CancellationToken cancellationToken)
+    /// <remarks>
+    /// Reads what changed since the transfer's sync_token, so the transfer's own objects are seen even when a full sync
+    /// of the account lags behind. A state without a token (saved by an earlier version) reads everything and then
+    /// what changed since that read. A created object that is not found stays unresolved: the account is read again up
+    /// to <paramref name="rereads"/> times with waits, and if it is still missing it stays unresolved for a resumed run. It is never marked
+    /// failed, and nothing that depends on it is sent with a guessed id.
+    /// <para>
+    /// Projects match by name among personal projects that existed neither before the transfer nor in the state; two
+    /// such candidates make the project fail, as a new read would not tell them apart. Tasks match by project, parent
+    /// and content (Markdown links reduced to their address), earliest sibling first. Ids found for objects Todoist
+    /// confirmed are matched first, then the commands in <paramref name="check"/>, in plan order.
+    /// </para>
+    /// </remarks>
+    /// <param name="check">Commands that got an error and would be sent again with a new uuid. One found in the account is done.</param>
+    /// <param name="rereads">How many more reads, with waits, while created objects are still not found.</param>
+    internal static async Task ResolveAsync(
+        TodoistPlan plan, TodoistTransferState state, TodoistClient client, IReadOnlyList<PlannedCommand> check, int rereads,
+        CancellationToken cancellationToken)
     {
-        var (projects, items) = await client.ReadProjectsAndItemsAsync(cancellationToken).ConfigureAwait(false);
-        var claimed = state.Ids.Values.Where(v => v.Length > 0).ToHashSet(StringComparer.Ordinal);
+        var reminders = check.Any(c => c.Type == ReminderAdd);
+        var view = await ReadViewAsync(state, client, null, reminders, cancellationToken).ConfigureAwait(false);
+        for (var reread = 1; ; reread++)
+        {
+            MatchUnresolved(plan, state, view);
+            if (state.Unresolved.Count == 0 || reread > rereads)
+            {
+                break;
+            }
 
+            await client.WaitAsync(TodoistClient.Backoff(reread),
+                $"looking for {TodoistPlanText.Count(state.Unresolved.Count, "created item", "created items")} in Todoist", cancellationToken).ConfigureAwait(false);
+            view = await ReadViewAsync(state, client, view, reminders, cancellationToken).ConfigureAwait(false);
+        }
+
+        MatchApplied(state, check, view);
+    }
+
+    /// <summary>The account's projects, tasks and reminders as far as recovery needs them, merged over several reads.</summary>
+    internal sealed class AccountView
+    {
+        public Dictionary<string, TodoistProject> Projects { get; } = new(StringComparer.Ordinal);
+
+        public Dictionary<string, TodoistItem> Items { get; } = new(StringComparer.Ordinal);
+
+        public Dictionary<string, TodoistReminder> Reminders { get; } = new(StringComparer.Ordinal);
+
+        public string? SyncToken { get; private set; }
+
+        public void Merge(TodoistChanges changes)
+        {
+            foreach (var id in changes.DeletedIds)
+            {
+                Projects.Remove(id);
+                Items.Remove(id);
+                Reminders.Remove(id);
+            }
+
+            foreach (var p in changes.Projects)
+            {
+                Projects[p.Id] = p;
+            }
+
+            foreach (var i in changes.Items)
+            {
+                Items[i.Id] = i;
+            }
+
+            foreach (var r in changes.Reminders)
+            {
+                Reminders[r.Id] = r;
+            }
+
+            SyncToken = changes.SyncToken ?? SyncToken;
+        }
+    }
+
+    private static async Task<AccountView> ReadViewAsync(
+        TodoistTransferState state, TodoistClient client, AccountView? previous, bool reminders, CancellationToken cancellationToken)
+    {
+        var view = previous ?? new AccountView();
+        var token = previous is null ? state.SyncToken ?? "*" : previous.SyncToken ?? "*";
+        var changes = await client.ReadChangesAsync(token, reminders, cancellationToken).ConfigureAwait(false);
+        view.Merge(changes);
+        if (changes.FullSync && changes.SyncToken is { } after)
+        {
+            // A full sync can lag behind on large accounts; what changed after it comes from an incremental sync.
+            view.Merge(await client.ReadChangesAsync(after, reminders, cancellationToken).ConfigureAwait(false));
+        }
+
+        return view;
+    }
+
+    private static bool IsNewProject(TodoistProject p, PlannedProject planned, TodoistTransferState state, HashSet<string> claimed) =>
+        p.Name == planned.Name && !p.IsInbox && p.IsPersonal && !state.PreexistingProjectIds.Contains(p.Id) && !claimed.Contains(p.Id);
+
+    /// <summary>The task in Todoist that <paramref name="item"/> became, or null when its project or parent has no id yet.</summary>
+    private static TodoistItem? FindItem(PlannedProject project, PlannedItem item, TodoistTransferState state, AccountView view, HashSet<string> claimed)
+    {
+        var projectId = HasId(state, project.Key) ? state.Ids[project.Key] : null;
+        var parentId = item.ParentKey is null ? null : HasId(state, item.ParentKey) ? state.Ids[item.ParentKey] : null;
+        if (projectId is null || (item.ParentKey is not null && parentId is null))
+        {
+            return null;
+        }
+
+        // Only tasks in a project this transfer created, under the expected parent, not yet claimed, with the same
+        // content once Markdown links are reduced to their address. Among equal candidates the earliest one wins:
+        // the plan is walked in creation order, so the n-th such sibling in the plan gets the n-th one in Todoist.
+        var key = MatchKey(item.Content);
+        return view.Items.Values
+            .Where(i => i.ProjectId == projectId && i.ParentId == parentId && !claimed.Contains(i.Id) && MatchKey(i.Content) == key)
+            .OrderBy(i => i.ChildOrder)
+            .ThenBy(i => i.Id, StringComparer.Ordinal)
+            .FirstOrDefault();
+    }
+
+    private static void MatchUnresolved(TodoistPlan plan, TodoistTransferState state, AccountView view)
+    {
+        var claimed = state.Ids.Values.Where(v => v.Length > 0).ToHashSet(StringComparer.Ordinal);
         foreach (var project in plan.Projects.Where(p => state.Unresolved.Contains(p.Key)))
         {
-            var candidates = projects
-                .Where(p => p.Name == project.Name && !p.IsInbox && !state.PreexistingProjectIds.Contains(p.Id) && !claimed.Contains(p.Id))
-                .ToList();
+            var candidates = view.Projects.Values.Where(p => IsNewProject(p, project, state, claimed)).ToList();
             if (candidates.Count == 1)
             {
                 state.Ids[project.Key] = candidates[0].Id;
                 claimed.Add(candidates[0].Id);
+                state.Unresolved.Remove(project.Key);
             }
-            else
+            else if (candidates.Count > 1)
             {
-                var reason = candidates.Count == 0 ? "created, but not found afterwards" : "several new projects have this name";
-                state.Failed[project.Key] = reason;
-                state.Errors.Add(new TransferError(LossKinds.TodoistError, ProjectAdd, project.Key, project.ListName, null, null,
-                    $"Cannot tell which Todoist project is \"{project.Name}\" ({reason}). Its remaining tasks were not created; check the account."));
+                Ambiguous(project, state);
+                state.Unresolved.Remove(project.Key);
             }
-
-            state.Unresolved.Remove(project.Key);
         }
 
         foreach (var (project, item) in plan.Projects.SelectMany(p => p.Items.Select(i => (p, i))).Where(x => state.Unresolved.Contains(x.i.Key)))
         {
-            state.Unresolved.Remove(item.Key);
             if (state.Completed.Contains(item.Key))
             {
-                state.Ids[item.Key] = string.Empty; // completed: not listed, and nothing refers to it any more
+                state.Ids[item.Key] = string.Empty; // completed: not listed by a full sync, and nothing refers to it any more
+                state.Unresolved.Remove(item.Key);
                 continue;
             }
 
-            var projectId = HasId(state, project.Key) ? state.Ids[project.Key] : null;
-            var parentId = item.ParentKey is null ? null : HasId(state, item.ParentKey) ? state.Ids[item.ParentKey] : null;
-
-            // Only tasks in a project this transfer created, under the expected parent, not yet claimed, with the same
-            // content once Markdown links are reduced to their address. Among equal candidates the earliest one wins:
-            // the plan is walked in creation order, so the n-th such sibling in the plan gets the n-th one in Todoist.
-            var key = MatchKey(item.Content);
-            var match = projectId is null || (item.ParentKey is not null && parentId is null)
-                ? null
-                : items
-                    .Where(i => i.ProjectId == projectId && i.ParentId == parentId && !claimed.Contains(i.Id) && MatchKey(i.Content) == key)
-                    .OrderBy(i => i.ChildOrder)
-                    .FirstOrDefault();
-            if (match is not null)
+            if (FindItem(project, item, state, view, claimed) is { } match)
             {
                 state.Ids[item.Key] = match.Id;
                 claimed.Add(match.Id);
-            }
-            else
-            {
-                state.Failed[item.Key] = "created, but not found afterwards";
-                state.Errors.Add(new TransferError(LossKinds.TodoistError, ItemAdd, item.Key, item.ListName, item.TaskTitle, null,
-                    "Todoist confirmed this task, but it could not be found afterwards; its sub-tasks, reminder and completion were skipped. Check the project."));
+                state.Unresolved.Remove(item.Key);
             }
         }
+    }
 
-        state.Unresolved.Clear();
+    private static void MatchApplied(TodoistTransferState state, IReadOnlyList<PlannedCommand> check, AccountView view)
+    {
+        var claimed = state.Ids.Values.Where(v => v.Length > 0).ToHashSet(StringComparer.Ordinal);
+        foreach (var c in check.Where(c => !state.Done.Contains(c.Uuid)))
+        {
+            switch (c.Type)
+            {
+                case ProjectAdd:
+                {
+                    var candidates = view.Projects.Values.Where(p => IsNewProject(p, c.Project, state, claimed)).ToList();
+                    if (candidates.Count == 1)
+                    {
+                        state.Ids[c.Key] = candidates[0].Id;
+                        claimed.Add(candidates[0].Id);
+                        state.Done.Add(c.Uuid);
+                    }
+                    else if (candidates.Count > 1)
+                    {
+                        Ambiguous(c.Project, state);
+                        state.Done.Add(c.Uuid);
+                    }
+
+                    break;
+                }
+
+                case ItemAdd when FindItem(c.Project, c.Item!, state, view, claimed) is { } match:
+                    state.Ids[c.Key] = match.Id;
+                    claimed.Add(match.Id);
+                    state.Done.Add(c.Uuid);
+                    break;
+                case ItemComplete when HasId(state, c.Key) && view.Items.TryGetValue(state.Ids[c.Key], out var item) && item.Checked:
+                    state.Completed.Add(c.Key);
+                    state.Done.Add(c.Uuid);
+                    break;
+                case ReminderAdd when HasId(state, c.Key) && view.Reminders.Values.Any(r => r.ItemId == state.Ids[c.Key] && SameTime(r.DueDate, c.Item!.ReminderUtc!.Value)):
+                    state.Reminders.Add(c.Key);
+                    state.Done.Add(c.Uuid);
+                    break;
+            }
+        }
+    }
+
+    private static bool SameTime(string? text, DateTimeOffset expected) =>
+        DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var at) && at.UtcDateTime == expected.UtcDateTime;
+
+    private static void Ambiguous(PlannedProject project, TodoistTransferState state)
+    {
+        const string Reason = "several new projects have this name";
+        state.Failed[project.Key] = Reason;
+        state.Errors.Add(new TransferError(LossKinds.TodoistError, ProjectAdd, project.Key, project.ListName, null, null,
+            $"Cannot tell which Todoist project is \"{project.Name}\" ({Reason}). Its remaining tasks were not created; check the account."));
+    }
+
+    private static string Describe(TodoistCommandResult status) =>
+        $"HTTP {status.HttpCode?.ToString(CultureInfo.InvariantCulture) ?? "?"}{(status.ErrorTag is { } tag ? " " + tag : string.Empty)}{(status.Error is { } e ? ": " + e : string.Empty)}";
+
+    private static string NotFinishedMessage(List<PlannedCommand> commands, TodoistTransferState state, IReadOnlySet<string> held, string? lastTemporary)
+    {
+        var parts = new List<string>();
+        if (held.Count > 0)
+        {
+            parts.Add($"Todoist failed {TodoistPlanText.Count(held.Count, "command", "commands")} {MaxTemporaryRetries + 1} times in a row ({lastTemporary}).");
+        }
+
+        if (state.Unresolved.Count > 0)
+        {
+            var n = state.Unresolved.Count;
+            parts.Add($"Todoist confirmed {TodoistPlanText.Count(n, "item", "items")}, but {(n == 1 ? "it was" : "they were")} not found in the account yet.");
+        }
+
+        var waiting = commands.Count(c => !state.Done.Contains(c.Uuid));
+        parts.Add(waiting == 0
+            ? "Continue the transfer later to look again."
+            : $"{TodoistPlanText.Count(waiting, "command is", "commands are")} not done yet, with everything that depends on {(held.Count + state.Unresolved.Count == 1 ? "it" : "them")}. Continue the transfer later to try again.");
+        return string.Join(" ", parts);
     }
 
     /// <summary>

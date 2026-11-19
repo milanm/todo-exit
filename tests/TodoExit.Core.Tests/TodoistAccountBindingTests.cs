@@ -111,9 +111,13 @@ public class TodoistAccountBindingTests
         Assert.Equal(TransferStatus.Completed, result.Status);
         var run = a.Requests.Skip(mark).ToList();
         var reads = run.Where(r => !r.Form.ContainsKey("commands")).ToList();
-        Assert.Equal("""["user"]""", Assert.Single(reads).Form["resource_types"]);
+        Assert.Equal(2, reads.Count);
+        Assert.Equal("""["user"]""", reads[0].Form["resource_types"]); // which account
+        Assert.Equal("""["projects","items"]""", reads[1].Form["resource_types"]); // the sync_token before the first write
+        Assert.Equal("*", reads[1].Form["sync_token"]);
         Assert.Equal(2, run.Count(r => r.Form.ContainsKey("commands"))); // 151 commands
         Assert.Same(reads[0], run[0]);
+        Assert.Same(reads[1], run[1]);
     }
 
     private static TodoistTransferState OldFormat(TodoistTransferState state)

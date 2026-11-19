@@ -242,6 +242,11 @@ public static class Program
         var reader = new GraphTodoReader(http, delay) { VerifySteps = options.VerifySteps };
         var progress = new SyncProgress<ReadProgress>(p => stderr.Write("\r" + FormatProgress(p).PadRight(90)));
 
+        if (resume is not null)
+        {
+            await stderr.WriteLineAsync(ResumeText(resume.ReadNotes));
+        }
+
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         var document = await reader.ReadAsync(progress, cancellationToken, resume);
         stopwatch.Stop();
@@ -261,6 +266,18 @@ public static class Program
                 : string.Empty));
 
         return document;
+    }
+
+    /// <summary>What a resumed read does, shown before it starts.</summary>
+    internal static string ResumeText(ReadNotes notes)
+    {
+        var unfinished = notes.Progress.Where(p => !p.TasksComplete).Select(p => notes.ListName(p.ListId) ?? p.ListId).ToList();
+        return unfinished.Count switch
+        {
+            0 => "Continuing the read. Lists that were finished are kept.",
+            1 => $"Continuing the read. Lists that were finished are kept. The list \"{unfinished[0]}\" was not finished, so it is read again from the start.",
+            _ => $"Continuing the read. Lists that were finished are kept. These lists were not finished, so they are read again from the start: {string.Join(", ", unfinished.Select(n => $"\"{n}\""))}.",
+        };
     }
 
     internal static async Task<TodoArchiveDocument> LoadFileAsync(string path, CancellationToken cancellationToken)

@@ -16,6 +16,9 @@ public static class ReadErrorKinds
 
     /// <summary>Graph refused to list attachments with the read-only permission. Recorded once per archive.</summary>
     public const string AttachmentsDenied = "attachments-denied";
+
+    /// <summary>A list changed while it was read (a task came back twice). Recorded once per list and read.</summary>
+    public const string ListChanged = "list-changed-during-read";
 }
 
 /// <summary>Something the reader could not get from Microsoft Graph.</summary>

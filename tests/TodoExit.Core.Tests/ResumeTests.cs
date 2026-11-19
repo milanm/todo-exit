@@ -129,9 +129,11 @@ public class ResumeTests
         var after = graph.Requests.Skip(mark).ToList();
 
         Assert.True(JsonNode.DeepEquals(Normalized(Baseline()), Normalized(resumed)));
-        Assert.DoesNotContain(after, r => r.Url == $"{Base}me/todo/lists/L1/tasks?$top=100");
-        Assert.DoesNotContain(after, r => r.Url == $"{Base}me/todo/lists/L1/tasks?$top=100&$skip=100");
-        Assert.Contains(after, r => r.Url == $"{Base}me/todo/lists/L1/tasks?$top=100&$skip=200");
+
+        // The unfinished list is read again from its start; the finished part of the account is not.
+        Assert.Equal(
+            [$"{Base}me/todo/lists/L1/tasks?$top=100", $"{Base}me/todo/lists/L1/tasks?$top=100&$skip=100", $"{Base}me/todo/lists/L1/tasks?$top=100&$skip=200"],
+            after.Where(r => r.Url.StartsWith($"{Base}me/todo/lists/L1/tasks?", StringComparison.Ordinal)).Select(r => r.Url));
         Assert.False(resumed.ReadNotes.Interrupted);
     }
 

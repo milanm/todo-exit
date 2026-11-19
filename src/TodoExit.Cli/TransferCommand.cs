@@ -206,7 +206,7 @@ internal static class TransferCommand
     {
         var list = p.CurrentList is null ? string.Empty : $" ({p.CurrentList})";
         return p.Waiting is { } wait
-            ? $"Todoist did not answer ({p.WaitingReason}); waiting {Math.Ceiling(wait.TotalSeconds)} s, {p.CommandsDone}/{p.CommandsTotal} done"
+            ? $"Waiting for Todoist ({p.WaitingReason}); trying again in {Math.Ceiling(wait.TotalSeconds)} s, {p.CommandsDone}/{p.CommandsTotal} done"
             : $"Transferring: {p.CommandsDone}/{p.CommandsTotal} commands{list}";
     }
 
@@ -220,6 +220,10 @@ internal static class TransferCommand
             sb.AppendLine($"  Todoist account: {a.Email ?? "(unknown)"} (plan: {a.PlanName ?? (a.IsPremium ? "premium" : "free")})");
             sb.AppendLine($"  Limits: {(a.MaxProjects is { } mp ? $"{mp} projects, {a.CountedProjects} in use, {plan.ProjectsAvailable} free" : "projects unknown")}; " +
                 $"{plan.Settings.MaxTasksPerProject} active tasks per project; reminders {(a.Reminders ? "yes" : "no")}");
+            if (a.TeamProjects > 0)
+            {
+                sb.AppendLine($"  Team projects: {a.TeamProjects}. They have their own limit and do not count here; the new projects are personal.");
+            }
         }
         else
         {

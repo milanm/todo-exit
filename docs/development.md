@@ -48,7 +48,18 @@ As of 2026-11-19:
 - The repeat-rule phrases in `RecurrenceText.cs`: Todoist accepted every phrase the tool can write as a recurring task with the right next date.
 - Transfer through the Todoist API, with the command-line tool on a free Todoist account: a plan against the real account, a real transfer read back and compared with the archive (20 tasks, 81 sub-tasks), refusal on an existing project name and on too few free projects, completed tasks and sub-tasks with past completion dates, and a transfer interrupted while a 100-command request was in flight and then continued. Every item arrived once, also after Todoist had rewritten plain web addresses into titled links.
 - The web app's Todoist step: in headless Chrome against a simulated Todoist API (plan, transfer, cancel and continue, rejected token, redirect not followed, token found in no storage, page text or downloaded file). On the hosted site against the real Todoist API: one list of the sample data (6 tasks), read back from Todoist with the right priority, labels, notes, due dates and repeat rules.
-- An external code review on 2026-11-19 found nine problems. Five are fixed with a regression test each: an outage during the read could produce an archive that looked complete, list names could make exported files overwrite each other, a Todoist transfer was not bound to the account of its plan, a new archive in the web app could drop a running transfer, and partly read tasks lost their steps. The outage fix was also checked against a separate simulated Graph in eight failure scenarios. Still open: retrying temporary errors of single Todoist commands, a stale full sync during id recovery, resuming a read when the list changed in between, and team projects in the Todoist project limit.
+- An external code review on 2026-11-19 found nine problems. All nine are fixed, each with a regression test built from the reviewer's scenario:
+  - an outage during the read could produce an archive that looked complete
+  - list names could make exported files overwrite each other
+  - a Todoist transfer was not bound to the account of its plan
+  - a new archive in the web app could drop a running transfer
+  - partly read tasks lost their steps (on the test account, 5 of the 18 partly read tasks turned out to have steps)
+  - a temporary error of one Todoist command ended the transfer as finished
+  - id recovery after a lost answer trusted a single full sync, which can lag
+  - a resumed read continued at a stored position and could miss tasks when the list had changed
+  - team projects counted against the personal Todoist project limit
+- The outage fix was also run against a separate simulated Graph in eight failure scenarios, and the new reader read the test account from the hosted site with the same counts as before.
+- Checked on the real Todoist API: an incremental sync returns new, completed and deleted tasks; a sync token works when more resource types are added later; an unknown token gives a full sync; a sub-task whose parent does not exist is refused with PARENT_NOT_FOUND.
 - The unit tests run on Linux and Windows on every push.
 
 Not tested yet: work and school accounts, Todoist reminders on a paid plan, a transfer into more than one free project at once on the real API, browsers that are not based on Chromium, and `--resume` against the real Graph (it is covered by tests against a fake one).

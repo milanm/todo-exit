@@ -11,6 +11,12 @@ namespace TodoExit.Core.Tests;
 /// temp_id_mapping and creates nothing, reminders are PREMIUM_ONLY when the plan has none, an optional active-task
 /// limit per project gives per-command errors, item_complete with date_completed, 429 with error_extra.retry_after,
 /// and 401 for a wrong token. Can execute a request and then fail instead of answering.
+/// Reads: sync_token "*" is a full sync (open tasks only) that returns a sync_token; a later read with that token
+/// returns only what changed since (completed tasks included), as measured. A full sync can be made to lag behind
+/// (<see cref="FullSyncFrozenAt"/>), which Todoist documents for large accounts. Personal projects have no
+/// workspace_id key, as measured; team projects have one. Not measured, modelled as the docs describe: a command can
+/// fail on its own with an http_code of 503 (<see cref="Transient"/>), or run and still answer 503
+/// (<see cref="AppliedButFailed"/>). Every answer, errors included, is remembered for its uuid.
 /// </summary>
 internal sealed class FakeTodoist : HttpMessageHandler
 {
@@ -19,6 +25,7 @@ internal sealed class FakeTodoist : HttpMessageHandler
     private readonly object _lock = new();
     private readonly Dictionary<string, JsonNode> _seen = new(StringComparer.Ordinal);
     private int _nextId = 1000;
+    private long _seq;
 
     public sealed class Project
     {
@@ -29,6 +36,17 @@ internal sealed class FakeTodoist : HttpMessageHandler
         public bool Inbox { get; init; }
 
         public bool CreatedByTransfer { get; init; }
+
+        /// <summary>Set for a team (workspace) project.</summary>
+        public string? WorkspaceId { get; init; }
+
+        /// <summary>Send "workspace_id": null instead of leaving the key out.</summary>
+        public bool NullWorkspaceKey { get; init; }
+
+        /// <summary>Change sequence numbers; -1 until the fake assigns one.</summary>
+        public long Created { get; set; } = -1;
+
+        public long Changed { get; set; } = -1;
     }
 
     public sealed class Item
@@ -54,9 +72,18 @@ internal sealed class FakeTodoist : HttpMessageHandler
         public string? CompletedAt { get; set; }
 
         public long ChildOrder { get; init; }
+
+        public long Created { get; set; } = -1;
+
+        public long Changed { get; set; } = -1;
     }
 
-    public sealed record Reminder(string ItemId, JsonObject Args);
+    public sealed record Reminder(string ItemId, JsonObject Args)
+    {
+        public string Id { get; init; } = string.Empty;
+
+        public long Created { get; set; } = -1;
+    }
 
     public sealed record Request(string Url, string? Authorization, IReadOnlyDictionary<string, string> Form)
     {
@@ -114,6 +141,34 @@ internal sealed class FakeTodoist : HttpMessageHandler
     /// </summary>
     public bool RewriteBareUrls { get; set; }
 
+    /// <summary>
+    /// "type:label" (label: the project name for project_add, the task content otherwise) to how many more times the
+    /// command fails on its own with http_code 503, without running.
+    /// </summary>
+    public Dictionary<string, int> Transient { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>"type:label" to how many more times the command runs but answers http_code 503 and no temp_id_mapping.</summary>
+    public Dictionary<string, int> AppliedButFailed { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>When set, a full sync shows the account as it was at this change number, with the sync_token of that point.</summary>
+    public long? FullSyncFrozenAt { get; set; }
+
+    /// <summary>Tasks with this content are left out of every read, as if Todoist had not indexed them yet.</summary>
+    public HashSet<string> HiddenFromReads { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>The current change number.</summary>
+    public long Sequence => _seq;
+
+    /// <summary>Freezes full syncs at the current state of the account.</summary>
+    public void FreezeFullSync()
+    {
+        lock (_lock)
+        {
+            Stamp();
+            FullSyncFrozenAt = _seq;
+        }
+    }
+
     /// <summary>When set, every request answers with a redirect to this address.</summary>
     public string? RedirectTo { get; set; }
 
@@ -126,6 +181,13 @@ internal sealed class FakeTodoist : HttpMessageHandler
     public Project AddProject(string name)
     {
         var p = new Project { Id = NewId("p"), Name = name };
+        Projects.Add(p);
+        return p;
+    }
+
+    public Project AddTeamProject(string name, string workspaceId = "ws-1")
+    {
+        var p = new Project { Id = NewId("p"), Name = name, WorkspaceId = workspaceId };
         Projects.Add(p);
         return p;
     }
@@ -163,7 +225,10 @@ internal sealed class FakeTodoist : HttpMessageHandler
 
         if (!form.TryGetValue("commands", out var commandsText))
         {
-            return Json(Read(form).ToJsonString());
+            lock (_lock)
+            {
+                return Json(Read(form).ToJsonString());
+            }
         }
 
         if (ServerErrors > 0)
@@ -197,7 +262,13 @@ internal sealed class FakeTodoist : HttpMessageHandler
             throw new TaskCanceledException("timeout", new TimeoutException());
         }
 
-        var response = Execute(commands);
+        JsonObject response;
+        lock (_lock)
+        {
+            Stamp();
+            response = Execute(commands);
+        }
+
         if (LoseResponse.Remove(number))
         {
             throw new TaskCanceledException("timeout", new TimeoutException());
@@ -243,11 +314,45 @@ internal sealed class FakeTodoist : HttpMessageHandler
             }
         }
 
+        var label = type switch
+        {
+            "project_add" => (string?)args["name"],
+            "item_add" => (string?)args["content"],
+            "item_complete" => Items.FirstOrDefault(i => i.Id == Resolve((string?)args["id"]))?.Content,
+            "reminder_add" => Items.FirstOrDefault(i => i.Id == Resolve((string?)args["item_id"]))?.Content,
+            _ => null,
+        };
+        var failure = $"{type}:{label}";
+        if (Transient.TryGetValue(failure, out var left) && left > 0)
+        {
+            Transient[failure] = left - 1;
+            return Error("SERVICE_UNAVAILABLE", 0, "Service unavailable", 503);
+        }
+
+        var result = RunCommand(type, args, tempId, temp, mapping, Resolve, Map);
+        if (AppliedButFailed.TryGetValue(failure, out var applied) && applied > 0 && result is JsonValue)
+        {
+            AppliedButFailed[failure] = applied - 1;
+            if (tempId is not null)
+            {
+                mapping.Remove(tempId);
+            }
+
+            return Error("SERVICE_UNAVAILABLE", 0, "Service unavailable", 503);
+        }
+
+        return result;
+    }
+
+    private JsonNode RunCommand(
+        string type, JsonObject args, string? tempId, Dictionary<string, string> temp, JsonObject mapping,
+        Func<string?, string?> Resolve, Action<string> Map)
+    {
         switch (type)
         {
             case "project_add":
             {
-                var p = new Project { Id = NewId("p"), Name = (string)args["name"]!, CreatedByTransfer = true };
+                var p = new Project { Id = NewId("p"), Name = (string)args["name"]!, CreatedByTransfer = true, Created = ++_seq, Changed = _seq };
                 Projects.Add(p);
                 Map(p.Id);
                 return "ok";
@@ -284,6 +389,8 @@ internal sealed class FakeTodoist : HttpMessageHandler
                     Labels = args["labels"]?.AsArray().Select(l => (string)l!).ToList() ?? new(),
                     Due = args["due"]?.DeepClone().AsObject(),
                     ChildOrder = Items.Count(i => i.ProjectId == projectId && i.ParentId == parentId) + 1,
+                    Created = ++_seq,
+                    Changed = _seq,
                 };
                 Items.Add(item);
                 Map(item.Id);
@@ -300,6 +407,7 @@ internal sealed class FakeTodoist : HttpMessageHandler
 
                 item.Checked = true;
                 item.CompletedAt = (string?)args["date_completed"] ?? "now";
+                item.Changed = ++_seq;
                 return "ok";
             }
 
@@ -316,8 +424,9 @@ internal sealed class FakeTodoist : HttpMessageHandler
                     return Error("INVALID_TEMPID", 15, "Invalid temporary id", 400);
                 }
 
-                Reminders.Add(new Reminder(itemId!, args.DeepClone().AsObject()));
-                Map(NewId("r"));
+                var reminder = new Reminder(itemId!, args.DeepClone().AsObject()) { Id = NewId("r"), Created = ++_seq };
+                Reminders.Add(reminder);
+                Map(reminder.Id);
                 return "ok";
             }
 
@@ -326,10 +435,50 @@ internal sealed class FakeTodoist : HttpMessageHandler
         }
     }
 
+    /// <summary>Gives a change number to objects that tests added directly.</summary>
+    private void Stamp()
+    {
+        foreach (var p in Projects.Where(p => p.Created < 0))
+        {
+            p.Created = p.Changed = ++_seq;
+        }
+
+        foreach (var i in Items.Where(i => i.Created < 0))
+        {
+            i.Created = i.Changed = ++_seq;
+        }
+    }
+
     private JsonObject Read(IReadOnlyDictionary<string, string> form)
     {
+        Stamp();
         var types = JsonNode.Parse(form["resource_types"])!.AsArray().Select(t => (string)t!).ToHashSet();
-        var root = new JsonObject { ["full_sync"] = true, ["sync_token"] = "token-" + _nextId };
+        var token = form.GetValueOrDefault("sync_token", "*");
+        long since = 0;
+        var full = !(token.StartsWith("token-", StringComparison.Ordinal)
+            && long.TryParse(token["token-".Length..], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out since)
+            && since <= _seq);
+        if (types.Contains("items") && RewriteBareUrls)
+        {
+            foreach (var item in Items)
+            {
+                var rewritten = RewriteUrls(item.Content);
+                if (rewritten != item.Content)
+                {
+                    item.Content = rewritten;
+                    item.Changed = ++_seq;
+                }
+            }
+        }
+
+        var at = full ? FullSyncFrozenAt ?? _seq : _seq;
+        bool Show(long created, long changed) => full ? created <= at : changed > since;
+        var root = new JsonObject { ["full_sync"] = full, ["sync_token"] = "token-" + at };
+        if (full)
+        {
+            root["full_sync_date_utc"] = "2026-11-19T21:17:48Z";
+        }
+
         if (types.Contains("user"))
         {
             root["user"] = new JsonObject
@@ -360,34 +509,49 @@ internal sealed class FakeTodoist : HttpMessageHandler
 
         if (types.Contains("projects"))
         {
-            root["projects"] = new JsonArray(Projects.Select(p => (JsonNode)new JsonObject
+            root["projects"] = new JsonArray(Projects.Where(p => Show(p.Created, p.Changed)).Select(p =>
             {
-                ["id"] = p.Id,
-                ["name"] = p.Name,
-                ["inbox_project"] = p.Inbox,
-                ["is_archived"] = false,
-                ["is_deleted"] = false,
+                var o = new JsonObject
+                {
+                    ["id"] = p.Id,
+                    ["name"] = p.Name,
+                    ["inbox_project"] = p.Inbox,
+                    ["is_archived"] = false,
+                    ["is_deleted"] = false,
+                };
+                if (p.WorkspaceId is not null || p.NullWorkspaceKey)
+                {
+                    o["workspace_id"] = p.WorkspaceId;
+                }
+
+                return (JsonNode)o;
             }).ToArray());
         }
 
         if (types.Contains("items"))
         {
-            if (RewriteBareUrls)
-            {
-                foreach (var item in Items)
+            root["items"] = new JsonArray(Items
+                .Where(i => Show(i.Created, i.Changed) && (!full || !i.Checked) && !HiddenFromReads.Contains(i.Content))
+                .Select(i => (JsonNode)new JsonObject
                 {
-                    item.Content = RewriteUrls(item.Content);
-                }
-            }
+                    ["id"] = i.Id,
+                    ["project_id"] = i.ProjectId,
+                    ["parent_id"] = i.ParentId,
+                    ["content"] = i.Content,
+                    ["child_order"] = i.ChildOrder,
+                    ["checked"] = i.Checked,
+                    ["is_deleted"] = false,
+                }).ToArray());
+        }
 
-            root["items"] = new JsonArray(Active.Select(i => (JsonNode)new JsonObject
+        if (types.Contains("reminders"))
+        {
+            root["reminders"] = new JsonArray(Reminders.Where(r => Show(r.Created, r.Created)).Select(r => (JsonNode)new JsonObject
             {
-                ["id"] = i.Id,
-                ["project_id"] = i.ProjectId,
-                ["parent_id"] = i.ParentId,
-                ["content"] = i.Content,
-                ["child_order"] = i.ChildOrder,
-                ["checked"] = false,
+                ["id"] = r.Id,
+                ["item_id"] = r.ItemId,
+                ["type"] = (string?)r.Args["type"],
+                ["due"] = r.Args["due"]?.DeepClone(),
                 ["is_deleted"] = false,
             }).ToArray());
         }

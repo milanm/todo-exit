@@ -50,7 +50,7 @@ todo-exit export    [--token <t> | --token-file <path> | --from-archive <file>] 
 
 ## If the read stops
 
-If the sign-in can no longer be renewed, a token you passed expires, Graph fails for another reason, or you press Ctrl+C, todo-exit saves everything it has read so far to `archive.partial.json` in the `--out` folder (the current folder for `inventory` without `--out`) and exits with code 3. Run the same command with `--resume archive.partial.json`; it asks you to sign in again (or takes a new token). The tool continues where it stopped and does not read finished work again. When it is done, you can delete `archive.partial.json`.
+If the sign-in can no longer be renewed, a token you passed expires, Graph fails for another reason, or you press Ctrl+C, todo-exit saves everything it has read so far to `archive.partial.json` in the `--out` folder (the current folder for `inventory` without `--out`) and exits with code 3. Run the same command with `--resume archive.partial.json`; it asks you to sign in again (or takes a new token). Lists that were finished are kept. The list that was being read is read again from its start, so a change in that list in the meantime cannot make the tool skip a task. When it is done, you can delete `archive.partial.json`.
 
 A network failure, throttling or an outage at Microsoft stops the read the same way. The tool never marks a list as finished, or a task as unreadable, because the service did not answer.
 
@@ -91,6 +91,6 @@ What it does:
 - `--include-completed` also transfers completed tasks and checked steps, completed in Todoist with their original date. On a large account this takes long: about 15 seconds per 100 items.
 - Reminders are added when your Todoist plan has reminders. Otherwise the report lists them.
 
-If the transfer stops, it saves `todoist-transfer-state.json` in `--out` and exits with code 3. Continue with `--resume <that file> --yes` and the same archive. A resumed transfer does not create duplicates, also when the last request reached Todoist but its answer was lost.
+If the transfer stops, or Todoist keeps failing a command with a temporary error, it saves `todoist-transfer-state.json` in `--out` and exits with code 3. Continue with `--resume <that file> --yes` and the same archive. A resumed transfer does not create duplicates, also when the last request reached Todoist but its answer was lost.
 
 `todoist-transfer-report.md` lists what was created and what was not carried.

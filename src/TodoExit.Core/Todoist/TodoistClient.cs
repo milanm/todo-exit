@@ -12,16 +12,56 @@ public sealed record TodoistCommand(string Type, string Uuid, string? TempId, Js
 public sealed record TodoistCommandResult(bool Ok, string? ErrorTag = null, int? ErrorCode = null, string? Error = null, int? HttpCode = null)
 {
     public static TodoistCommandResult Success { get; } = new(true);
+
+    /// <summary>error_extra.retry_after of the command's error, when Todoist sent one.</summary>
+    public TimeSpan? RetryAfter { get; init; }
+
+    /// <summary>
+    /// The command failed for a reason that may go away: http_code 408, 429 or 5xx. Every other error is taken as a
+    /// refusal that a retry would not change.
+    /// </summary>
+    public bool IsTemporary => !Ok && HttpCode is 408 or 429 or >= 500;
 }
 
 public sealed record TodoistSyncResult(
     IReadOnlyDictionary<string, TodoistCommandResult> Status,
     IReadOnlyDictionary<string, string> TempIdMapping);
 
-public sealed record TodoistProject(string Id, string Name, bool IsInbox, bool IsArchived);
+public sealed record TodoistProject(string Id, string Name, bool IsInbox, bool IsArchived)
+{
+    /// <summary>
+    /// workspace_id of a team project. Null for a personal project: on a personal account the key is not sent at all.
+    /// </summary>
+    public string? WorkspaceId { get; init; }
 
-/// <summary>An active task as the full sync returns it. Used to recover ids after a lost response.</summary>
-public sealed record TodoistItem(string Id, string ProjectId, string? ParentId, string Content, long ChildOrder);
+    public bool IsPersonal => WorkspaceId is null;
+}
+
+/// <summary>A task as a sync read returns it. Used to recover ids after a lost response.</summary>
+public sealed record TodoistItem(string Id, string ProjectId, string? ParentId, string Content, long ChildOrder)
+{
+    /// <summary>Completed. A full sync lists only open tasks; an incremental sync can return completed ones.</summary>
+    public bool Checked { get; init; }
+}
+
+/// <summary>A reminder as a sync read returns it.</summary>
+public sealed record TodoistReminder(string Id, string ItemId, string? Type, string? DueDate);
+
+/// <summary>
+/// What one sync read returned: everything (full sync) or only what changed since a sync_token (incremental sync).
+/// Deleted objects are left out.
+/// </summary>
+public sealed record TodoistChanges(
+    bool FullSync,
+    string? SyncToken,
+    string? FullSyncDateUtc,
+    IReadOnlyList<TodoistProject> Projects,
+    IReadOnlyList<TodoistItem> Items,
+    IReadOnlyList<TodoistReminder> Reminders)
+{
+    /// <summary>Ids that this read reported as deleted.</summary>
+    public IReadOnlySet<string> DeletedIds { get; init; } = new HashSet<string>(StringComparer.Ordinal);
+}
 
 /// <summary>What the transfer needs to know about the account. Read with one read-only sync request.</summary>
 public sealed record TodoistAccount(
@@ -38,8 +78,14 @@ public sealed record TodoistAccount(
     /// <summary>Todoist's id of the user (user.id, a string). A transfer is bound to it.</summary>
     public string? UserId { get; init; }
 
-    /// <summary>Projects that count against max_projects: everything except the Inbox and archived projects.</summary>
-    public int CountedProjects => Projects.Count(p => !p.IsInbox && !p.IsArchived);
+    /// <summary>
+    /// Projects that count against max_projects: personal projects except the Inbox and archived ones. Team
+    /// (workspace) projects have limits of their own and are not counted.
+    /// </summary>
+    public int CountedProjects => Projects.Count(p => !p.IsInbox && !p.IsArchived && p.IsPersonal);
+
+    /// <summary>Active team (workspace) projects. Not counted against max_projects.</summary>
+    public int TeamProjects => Projects.Count(p => !p.IsArchived && !p.IsPersonal);
 }
 
 /// <summary>Who a token belongs to: user.id and email, and the projects when they were asked for.</summary>
@@ -142,35 +188,101 @@ public sealed class TodoistClient
         return new TodoistIdentity(Id(user, "id"), Str(user, "email"), withProjects ? ParseProjects(root["projects"]) : []);
     }
 
-    /// <summary>Reads all active projects and tasks. Read-only. Used to find ids a lost response did not deliver.</summary>
-    public async Task<(IReadOnlyList<TodoistProject> Projects, IReadOnlyList<TodoistItem> Items)> ReadProjectsAndItemsAsync(
-        CancellationToken cancellationToken)
+    /// <summary>
+    /// Takes a sync_token before a transfer writes anything (sync_token "*", projects and tasks). Read-only. Later reads
+    /// with this token return what changed since, the transfer's own objects included.
+    /// </summary>
+    public Task<TodoistChanges> ReadSyncTokenAsync(CancellationToken cancellationToken) =>
+        ReadChangesAsync("*", reminders: false, cancellationToken);
+
+    /// <summary>
+    /// Reads projects and tasks, and reminders when asked: all of them for <paramref name="syncToken"/> "*", otherwise
+    /// what changed since that token. Read-only.
+    /// </summary>
+    public async Task<TodoistChanges> ReadChangesAsync(string syncToken, bool reminders, CancellationToken cancellationToken)
     {
-        var root = await ReadAsync(["projects", "items"], cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<string> types = reminders ? ["projects", "items", "reminders"] : ["projects", "items"];
+        var root = await ReadAsync(types, syncToken, cancellationToken).ConfigureAwait(false);
+        var deleted = new HashSet<string>(StringComparer.Ordinal);
         var items = new List<TodoistItem>();
         if (root["items"] is JsonArray array)
         {
             foreach (var item in array.OfType<JsonObject>())
             {
-                if (Bool(item, "is_deleted") == true || Bool(item, "checked") == true || Id(item, "id") is not { } id
-                    || Id(item, "project_id") is not { } projectId)
+                if (Id(item, "id") is not { } id)
                 {
                     continue;
                 }
 
+                if (Bool(item, "is_deleted") == true || Id(item, "project_id") is not { } projectId)
+                {
+                    deleted.Add(id);
+                    continue;
+                }
+
                 items.Add(new TodoistItem(id, projectId, Id(item, "parent_id"), Str(item, "content") ?? string.Empty,
-                    Long(item, "child_order") ?? 0));
+                    Long(item, "child_order") ?? 0) { Checked = Bool(item, "checked") == true });
             }
         }
 
-        return (ParseProjects(root["projects"]), items);
+        var found = new List<TodoistReminder>();
+        if (root["reminders"] is JsonArray reminderArray)
+        {
+            foreach (var r in reminderArray.OfType<JsonObject>())
+            {
+                if (Id(r, "id") is not { } id)
+                {
+                    continue;
+                }
+
+                if (Bool(r, "is_deleted") == true || Id(r, "item_id") is not { } itemId)
+                {
+                    deleted.Add(id);
+                    continue;
+                }
+
+                found.Add(new TodoistReminder(id, itemId, Str(r, "type"), Str(r["due"] as JsonObject, "date")));
+            }
+        }
+
+        if (root["projects"] is JsonArray projectArray)
+        {
+            foreach (var p in projectArray.OfType<JsonObject>())
+            {
+                if (Bool(p, "is_deleted") == true && Id(p, "id") is { } id)
+                {
+                    deleted.Add(id);
+                }
+            }
+        }
+
+        return new TodoistChanges(Bool(root, "full_sync") ?? syncToken == "*", Str(root, "sync_token"), Str(root, "full_sync_date_utc"),
+            ParseProjects(root["projects"]), items, found)
+        {
+            DeletedIds = deleted,
+        };
     }
 
-    public async Task<JsonObject> ReadAsync(IReadOnlyList<string> resourceTypes, CancellationToken cancellationToken)
+    /// <summary>Waits before a retry, through the delay given to the constructor, and tells <see cref="Waiting"/>.</summary>
+    public async Task WaitAsync(TimeSpan wait, string reason, CancellationToken cancellationToken)
+    {
+        if (wait > MaxWait)
+        {
+            wait = MaxWait;
+        }
+
+        Waiting?.Invoke(wait, reason);
+        await _delay(wait, cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task<JsonObject> ReadAsync(IReadOnlyList<string> resourceTypes, CancellationToken cancellationToken) =>
+        ReadAsync(resourceTypes, "*", cancellationToken);
+
+    private async Task<JsonObject> ReadAsync(IReadOnlyList<string> resourceTypes, string syncToken, CancellationToken cancellationToken)
     {
         var types = new JsonArray(resourceTypes.Select(t => (JsonNode)JsonValue.Create(t)!).ToArray());
         return await PostAsync(
-            [new("sync_token", "*"), new("resource_types", types.ToJsonString())], cancellationToken).ConfigureAwait(false);
+            [new("sync_token", syncToken), new("resource_types", types.ToJsonString())], cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Sends at most <see cref="MaxCommandsPerRequest"/> commands in one request.</summary>
@@ -191,6 +303,11 @@ public sealed class TodoistClient
                     ? TodoistCommandResult.Success
                     : value is JsonObject e
                         ? new TodoistCommandResult(false, Str(e, "error_tag"), Int(e, "error_code"), Str(e, "error"), Int(e, "http_code"))
+                        {
+                            RetryAfter = (e["error_extra"] as JsonObject) is { } extra && Long(extra, "retry_after") is { } seconds && seconds >= 0
+                                ? TimeSpan.FromSeconds(seconds)
+                                : null,
+                        }
                         : new TodoistCommandResult(false, "UNKNOWN", null, value?.ToJsonString());
             }
         }
@@ -368,7 +485,10 @@ public sealed class TodoistClient
                 continue;
             }
 
-            projects.Add(new TodoistProject(id, Str(p, "name") ?? string.Empty, Bool(p, "inbox_project") ?? false, Bool(p, "is_archived") ?? false));
+            projects.Add(new TodoistProject(id, Str(p, "name") ?? string.Empty, Bool(p, "inbox_project") ?? false, Bool(p, "is_archived") ?? false)
+            {
+                WorkspaceId = Id(p, "workspace_id") is { Length: > 0 } workspace ? workspace : null,
+            });
         }
 
         return projects;

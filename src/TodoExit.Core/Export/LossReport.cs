@@ -331,6 +331,11 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
             read.Add("attachment names were not available");
         }
 
+        if (Errors(ReadErrorKinds.ListChanged) is var changed and > 0)
+        {
+            read.Add(changed == 1 ? "1 list changed while it was read" : $"{N(changed)} lists changed while they were read");
+        }
+
         if (read.Count > 0)
         {
             var sentence = read.Count <= 2

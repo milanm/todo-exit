@@ -296,6 +296,13 @@ public sealed class GraphTodoReader
 
             if (!state.TasksComplete)
             {
+                if (state.ReadAgain)
+                {
+                    // The list may have changed since the earlier run stopped, so the old position is not trusted:
+                    // the list is read again from its start, and its earlier tasks and read errors are replaced.
+                    StartOver(state);
+                }
+
                 progress?.Report(new ReadProgress(ReadPhase.Tasks, i, lists.Count, run.TasksRead, context.Name));
                 try
                 {
@@ -364,10 +371,38 @@ public sealed class GraphTodoReader
         return TodoArchiveDocument.Create(_clock(), lists, notes);
     }
 
+    /// <summary>
+    /// Drops what an earlier run read of a list whose tasks were not finished: its tasks, its paging position and
+    /// the read errors recorded for it. The attachments-denied note is about the whole account and stays.
+    /// </summary>
+    private void StartOver(ListState state)
+    {
+        state.ReadAgain = false;
+        state.ProbeUntil = state.NextSkip;
+        state.Tasks.Clear();
+        state.NextSkip = 0;
+        lock (_errorsLock)
+        {
+            _errors.RemoveAll(e => e.ListId == state.Id && e.Kind != ReadErrorKinds.AttachmentsDenied);
+        }
+    }
+
     /// <summary>One list being read. Tasks are detached JSON objects that are changed in place as work completes.</summary>
     private sealed class ListState(string id, JsonObject list)
     {
         public string Id { get; } = id;
+
+        /// <summary>Loaded from a partial archive with its tasks not finished: read again from the start.</summary>
+        public bool ReadAgain { get; set; }
+
+        /// <summary>
+        /// When a list is read again, the position the earlier run reached. Windows before it do not count towards the
+        /// stop after <see cref="MaxDeadWindows"/> unreadable windows, so a read that stopped there gets past them.
+        /// </summary>
+        public int ProbeUntil { get; set; }
+
+        /// <summary>The note that this list changed during the read was recorded in this run.</summary>
+        public bool ChangeNoted { get; set; }
 
         public JsonObject List { get; set; } = list;
 
@@ -452,6 +487,7 @@ public sealed class GraphTodoReader
                     state.NextSkip = p?.NextSkip ?? state.Tasks.Count;
                     state.StepsComplete = p?.StepsComplete ?? true;
                     state.AttachmentsComplete = p?.AttachmentsComplete ?? true;
+                    state.ReadAgain = !state.TasksComplete;
                     run.Lists.Add(state);
                 }
             }
@@ -491,10 +527,16 @@ public sealed class GraphTodoReader
     /// outage) is bisected, so every readable task is still read. An outage is never bisected: it stops the read with
     /// the checkpoint at the start of the window.
     /// </summary>
+    /// <remarks>
+    /// If the list changes while it is read, $skip positions move: a task can come back twice or be skipped. A task id
+    /// that comes back is kept once and the list gets a <see cref="ReadErrorKinds.ListChanged"/> note. A skipped task
+    /// cannot be seen in the pages, so the note is the only hint.
+    /// </remarks>
     private async Task ReadTasksAsync(
         ListContext list, ListState state, RunState run, IProgress<ReadProgress>? progress, CancellationToken cancellationToken)
     {
         var deadWindows = 0;
+        var seen = state.Tasks.Select(t => GetString(t, "id")).OfType<string>().ToHashSet(StringComparer.Ordinal);
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -510,7 +552,7 @@ public sealed class GraphTodoReader
                 }
 
                 // Tasks and the paging position change together, so a partial archive never holds half a window.
-                state.Tasks.AddRange(values);
+                AddTasks(list, state, seen, values);
                 state.NextSkip = skip + values.Count;
                 progress?.Report(new ReadProgress(ReadPhase.Tasks, list.Index, list.Total, run.TasksRead, list.Name));
                 if (next is null || values.Count == 0)
@@ -532,7 +574,7 @@ public sealed class GraphTodoReader
                 throw WindowOutage(list, window);
             }
 
-            state.Tasks.AddRange(window.Tasks);
+            AddTasks(list, state, seen, window.Tasks);
             foreach (var error in window.Errors)
             {
                 AddError(error);
@@ -541,7 +583,7 @@ public sealed class GraphTodoReader
             state.NextSkip = skip + PageSize;
             progress?.Report(new ReadProgress(ReadPhase.Tasks, list.Index, list.Total, run.TasksRead, list.Name));
 
-            var dead = window.Tasks.Count == 0 && window.Errors.Count > 0;
+            var dead = window.Tasks.Count == 0 && window.Errors.Count > 0 && skip + PageSize > state.ProbeUntil;
             deadWindows = dead ? deadWindows + 1 : 0;
             if (deadWindows >= MaxDeadWindows)
             {
@@ -551,6 +593,28 @@ public sealed class GraphTodoReader
                     $"Microsoft Graph returned no readable task in {MaxDeadWindows * PageSize} positions in a row in the list '{list.Name}', " +
                     $"up to position {skip + PageSize - 1}. The read stopped there; the list is not complete.");
             }
+        }
+    }
+
+    /// <summary>Adds tasks in page order, keeping one copy of a task id that was already read in this list.</summary>
+    private void AddTasks(ListContext list, ListState state, HashSet<string> seen, List<JsonObject> tasks)
+    {
+        foreach (var task in tasks)
+        {
+            if (GetString(task, "id") is { } id && !seen.Add(id))
+            {
+                if (!state.ChangeNoted)
+                {
+                    state.ChangeNoted = true;
+                    AddError(new ReadError(ReadErrorKinds.ListChanged, list.Id, list.Name, null, null, null,
+                        "This list changed while it was read: Microsoft Graph returned some tasks twice, and each was kept once. " +
+                        "Tasks added, moved or deleted during the read may be missing or out of date. Read your tasks again to be sure."));
+                }
+
+                continue;
+            }
+
+            state.Tasks.Add(task);
         }
     }
 
