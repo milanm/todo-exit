@@ -63,6 +63,15 @@ public sealed record TodoItem
     public IReadOnlyList<LinkedResource> LinkedResources { get; init; } = [];
 
     public IReadOnlyList<AttachmentInfo> Attachments { get; init; } = [];
+
+    /// <summary>Graph's hasAttachments flag. Can be true while <see cref="Attachments"/> is empty (names not readable).</summary>
+    public bool HasAttachments { get; init; }
+
+    /// <summary>The task has attachments, whether or not their names are known.</summary>
+    public bool HasAnyAttachment => HasAttachments || Attachments.Count > 0;
+
+    /// <summary>The task has attachments but Graph did not give their names.</summary>
+    public bool AttachmentNamesUnknown => HasAttachments && Attachments.Count == 0;
 }
 
 public sealed record Step(string Title, bool IsChecked);

@@ -29,6 +29,9 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
         {
             var c = Inventory.Totals;
             w.WriteStartObject();
+            w.WriteBoolean("interrupted", ReadNotes.Interrupted);
+            WriteNullable(w, "interruptedReason", ReadNotes.Interrupted ? ReadNotes.InterruptedReason ?? "unknown" : null);
+            WriteNullable(w, "listInProgress", ReadNotes.Interrupted ? ListInProgressName() : null);
             w.WriteStartObject("inventory");
             w.WriteNumber("lists", c.Lists);
             w.WriteNumber("tasks", c.Tasks);
@@ -101,6 +104,23 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
     {
         var sb = new StringBuilder();
         sb.Append("# todo-exit report\n\n");
+        if (ReadNotes.Interrupted)
+        {
+            sb.Append("**This archive is incomplete.** The read from Microsoft Graph stopped before it finished: ")
+                .Append(EscapeInline(ReadNotes.InterruptedReason ?? "unknown reason")).Append("\n\n");
+            if (ListInProgressName() is { } inProgress)
+            {
+                var p = ReadNotes.ListInProgress!;
+                sb.Append("List in progress: **").Append(EscapeInline(inProgress)).Append("** (")
+                    .Append(p.TasksComplete ? "all tasks read" : $"tasks read up to position {p.NextSkip.ToString(CultureInfo.InvariantCulture)}")
+                    .Append(p.StepsComplete ? ", steps read" : ", steps not finished")
+                    .Append(p.AttachmentsComplete ? ", attachment details read" : ", attachment details not finished")
+                    .Append(").\n\n");
+            }
+
+            sb.Append("Lists that had not been started are missing. Run the read again with --resume to finish it.\n\n");
+        }
+
         sb.Append("## Inventory\n\n");
         sb.Append("| Item | Count |\n|---|---:|\n");
         foreach (var (label, value) in Inventory.Totals.Rows())
@@ -165,7 +185,7 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
 
     private void AppendReadErrors(StringBuilder sb)
     {
-        if (ReadNotes.IsEmpty)
+        if (!ReadNotes.StepsForCompletedTasksSkipped && ReadNotes.Errors.Count == 0)
         {
             return;
         }
@@ -209,6 +229,19 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
 
             sb.Append('\n');
         }
+    }
+
+    /// <summary>Name (or id) of the list the interrupted read was working on.</summary>
+    private string? ListInProgressName()
+    {
+        if (ReadNotes.ListInProgress is not { } p)
+        {
+            return null;
+        }
+
+        return ReadNotes.ListName(p.ListId)
+            ?? Inventory.PerList.FirstOrDefault(l => l.ListId == p.ListId)?.ListName
+            ?? p.ListId;
     }
 
     private static void WriteNullable(Utf8JsonWriter w, string name, string? value)

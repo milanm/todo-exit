@@ -91,6 +91,7 @@ public static partial class ArchiveParser
             Recurrence = ParseRecurrence(task["recurrence"] as JsonObject),
             LinkedResources = ParseLinkedResources(task["linkedResources"]),
             Attachments = ParseAttachments(task["attachments"]),
+            HasAttachments = Bool(task, "hasAttachments") ?? false,
         };
     }
 

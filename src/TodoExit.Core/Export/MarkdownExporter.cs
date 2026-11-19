@@ -17,7 +17,7 @@ public static class MarkdownExporter
 
             if (losses is not null)
             {
-                foreach (var task in list.Tasks.Where(t => t.Attachments.Count > 0))
+                foreach (var task in list.Tasks.Where(t => t.HasAnyAttachment))
                 {
                     losses.Add(AttachmentLoss(ExportFormatNames.Markdown, list, task));
                 }
@@ -32,7 +32,9 @@ public static class MarkdownExporter
         list.Name,
         task.Title,
         LossKinds.AttachmentNotCarried,
-        "Attachment content is not exported: " + string.Join(", ", task.Attachments.Select(a => a.Name)));
+        task.AttachmentNamesUnknown
+            ? "Attachment content is not exported, and the attachment names could not be read from Microsoft Graph."
+            : "Attachment content is not exported: " + string.Join(", ", task.Attachments.Select(a => a.Name)));
 
     public static string Render(TaskList list)
     {
@@ -146,6 +148,11 @@ public static class MarkdownExporter
                 sb.Append(indent).Append("- link: [").Append(EscapeLinkText(OneLine(name))).Append("](")
                     .Append(link.WebUrl.Replace(" ", "%20").Replace(")", "%29")).Append(")\n");
             }
+        }
+
+        if (task.AttachmentNamesUnknown)
+        {
+            sb.Append(indent).Append("- attachment: (name not available)\n");
         }
 
         foreach (var attachment in task.Attachments)

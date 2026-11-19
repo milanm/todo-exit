@@ -23,7 +23,7 @@ public static class GenericCsvExporter
             foreach (var task in list.Tasks)
             {
                 Csv.AppendRow(sb, Row(list, task));
-                if (losses is not null && task.Attachments.Count > 0)
+                if (losses is not null && task.HasAnyAttachment)
                 {
                     losses.Add(MarkdownExporter.AttachmentLoss(ExportFormatNames.Csv, list, task));
                 }
@@ -50,7 +50,7 @@ public static class GenericCsvExporter
             string.Join("; ", task.Steps.Select(s => (s.IsChecked ? "[x] " : "[ ] ") + s.Title)),
             string.Join("; ", task.Categories),
             string.Join("; ", task.LinkedResources.Select(FormatLink)),
-            string.Join("; ", task.Attachments.Select(a => a.Name)),
+            task.AttachmentNamesUnknown ? "(names not available)" : string.Join("; ", task.Attachments.Select(a => a.Name)),
             task.CreatedAt is { } created ? Fmt.DateTime(created) : null,
             task.CompletedAt is { } completed ? Fmt.DateTime(completed) : null,
         ];

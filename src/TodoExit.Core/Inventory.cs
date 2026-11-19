@@ -53,7 +53,10 @@ public sealed record InventoryCounts(
     ];
 }
 
-public sealed record ListInventory(string ListName, InventoryCounts Counts);
+public sealed record ListInventory(string ListName, InventoryCounts Counts)
+{
+    public string? ListId { get; init; }
+}
 
 public sealed record Inventory(InventoryCounts Totals, IReadOnlyList<ListInventory> PerList)
 {
@@ -61,7 +64,7 @@ public sealed record Inventory(InventoryCounts Totals, IReadOnlyList<ListInvento
     {
         var unreadable = archive.ReadNotes.Errors.Where(e => e.Kind == ReadErrorKinds.TaskUnreadable).ToList();
         var perList = archive.Lists
-            .Select(l => new ListInventory(l.Name, Count(l, unreadable.Count(e => e.ListId == l.Id))))
+            .Select(l => new ListInventory(l.Name, Count(l, unreadable.Count(e => e.ListId == l.Id))) { ListId = l.Id })
             .ToList();
         var totals = perList.Aggregate(InventoryCounts.Empty, (acc, l) => acc.Add(l.Counts));
         return new Inventory(totals, perList);
@@ -79,7 +82,7 @@ public sealed record Inventory(InventoryCounts Totals, IReadOnlyList<ListInvento
             WithSteps: tasks.Count(t => t.Steps.Count > 0),
             WithNotes: tasks.Count(t => t.Notes is not null),
             WithReminders: tasks.Count(t => t.Reminder is not null),
-            WithAttachments: tasks.Count(t => t.Attachments.Count > 0),
+            WithAttachments: tasks.Count(t => t.HasAnyAttachment),
             WithLinkedResources: tasks.Count(t => t.LinkedResources.Count > 0),
             SharedLists: list.IsShared ? 1 : 0,
             Unreadable: unreadable,

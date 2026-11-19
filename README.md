@@ -34,10 +34,12 @@ There are two ways to run it:
 | Categories | kept | kept as `#tags` | kept as `@labels` | kept |
 | Completed tasks | kept | kept under "Completed" | skipped by default; `--include-completed` writes them as open tasks | kept |
 | Linked resources (for example a flagged email) | kept | kept as links | added to the description | kept |
-| Attachments | file name, size and type only | file name and size only | not carried | file names only |
+| Attachments | which tasks have attachments; file name, size and type when Graph allows it (see below) | marked, with names when known | not carried | file names when known |
 | List sharing and members | kept as Graph returned it | not carried | not carried | not carried |
 
 Attachment content is never downloaded. If you need an attached file, open the task in To Do and save it before the apps retire.
+
+With read-only access, Microsoft Graph refuses to list attachments on personal accounts (observed in November 2026: it answers 401 accessDenied, although the documentation says `Tasks.Read` is enough). In that case the archive still records which tasks have attachments, but not the file names, and the report says so once. todo-exit does not ask for write access to work around this.
 
 The report lists each loss by format, list and task, so you can fix the important ones by hand.
 
@@ -52,14 +54,16 @@ All of this is recorded in a "Could not be read from Microsoft Graph" section at
 | `task-unreadable` | The task could not be read at all and is missing. The report gives its position in the list. |
 | `task-partial` | Graph failed partway through the task. It is kept with the properties Graph sent, and the report names the property that failed. |
 | `steps-unreadable` | The task's steps could not be read. |
-| `attachments-unreadable` | The list of attachment names could not be read. |
+| `attachments-unreadable` | The list of attachment names could not be read for one task. |
+| `attachments-denied` | Graph refused to list attachments with read-only access. Recorded once; tasks with attachments are still marked. |
 
 If you used `--skip-completed-steps`, the report says so in one line.
 
 ## Privacy
 
 - todo-exit asks for one permission: `Tasks.Read`. It can read your tasks. It cannot change or delete them.
-- Every request it makes is read-only. Steps are read through Graph's batch endpoint (`POST /$batch`), which bundles up to 20 read requests into one call. The batch contains only reads.
+- Every request it makes is read-only. Steps and attachment details are read through Graph's batch endpoint (`POST /$batch`), which bundles up to 20 read requests into one call. The batch contains only reads.
+- With read-only access, Graph refuses to list attachments on personal accounts (observed November 2026). The archive then records which tasks have attachments but not the file names. todo-exit does not ask for write access to get around this.
 - The web app runs entirely in your browser. The only network requests it makes are to Microsoft Graph, from your browser. Your tasks are not sent to any other server.
 - The command-line tool runs on your computer and talks only to Microsoft Graph.
 - Neither tool stores your token. The CLI never prints it.
@@ -98,10 +102,10 @@ The full syntax:
 
 ```
 todo-exit inventory (--token <t> | --token-file <path> | --from-archive <file>) [--timezone <IANA id>]
-                    [--skip-completed-steps]
+                    [--skip-completed-steps] [--resume <file>] [--out <dir>]
 todo-exit export    (--token <t> | --token-file <path> | --from-archive <file>) --out <dir>
                     [--formats json,markdown,todoist,csv] [--include-completed] [--timezone <IANA id>]
-                    [--skip-completed-steps]
+                    [--skip-completed-steps] [--resume <file>]
 ```
 
 - `--from-archive` reads an `archive.json` written earlier, so you can export again later without signing in.
@@ -109,7 +113,13 @@ todo-exit export    (--token <t> | --token-file <path> | --from-archive <file>) 
 - `--timezone` sets the zone used for due dates and reminders. It defaults to your computer's zone. Use the zone you used To Do in, otherwise due dates can shift by a day.
 - `--skip-completed-steps` does not read the steps of completed tasks. Steps need one read per task, so on an account with thousands of completed tasks this saves a lot of time. Completed tasks then have no steps in any format, and the report notes it.
 - While reading, the tool shows progress on one line, and when it is done it prints how many lists and tasks it read, how many read errors there were, and how long it took.
-- Exit codes: 0 on success, 1 for a usage error, 2 when the export fails.
+- Exit codes: 0 on success, 1 for a usage error, 2 when the export fails, 3 when the read was interrupted and a partial archive was saved.
+
+### If the read stops
+
+A token from Graph Explorer lasts about an hour, and a large account can take longer than that to read. If the token expires, Graph fails for another reason, or you press Ctrl+C, todo-exit saves everything it has read so far to `archive.partial.json` in the `--out` folder (the current folder for `inventory` without `--out`) and exits with code 3. Get a new token and run the same command with `--resume archive.partial.json`. The tool continues where it stopped and does not read finished work again. When it is done, you can delete `archive.partial.json`.
+
+A partial archive also works with `--from-archive`. The report then starts with a note that the archive is incomplete and names the list that was in progress.
 
 ### Large accounts
 

@@ -84,6 +84,13 @@
     @if (_error is not null)
     {
         <p class="error" role="alert">@_error</p>
+        @if (_partial is not null)
+        {
+            <p>What was read before it stopped is kept in this page. It is a partial archive; the command-line tool can continue it with --resume.</p>
+            <div class="actions">
+                <button type="button" class="button" @onclick="DownloadPartialAsync">Download what was read so far</button>
+            </div>
+        }
     }
 </section>
 
@@ -153,7 +160,12 @@
         }
         else
         {
-            @if (!_report.ReadNotes.IsEmpty)
+            @if (_report.ReadNotes.Interrupted)
+            {
+                <p class="error">This archive is incomplete. The read stopped: @_report.ReadNotes.InterruptedReason</p>
+            }
+
+            @if (_report.ReadNotes.StepsForCompletedTasksSkipped || _report.ReadNotes.Errors.Count > 0)
             {
                 <h3>Could not be read from Microsoft Graph</h3>
                 <p>This applies to every format, the JSON archive included.</p>
@@ -231,6 +243,7 @@
     private CancellationTokenSource? _cts;
 
     private TodoArchiveDocument? _document;
+    private TodoArchiveDocument? _partial;
     private TodoArchive? _archive;
     private Inventory? _inventory;
     private LossReport? _report;
@@ -279,6 +292,7 @@
     private async Task ReadFromGraphAsync()
     {
         _error = null;
+        _partial = null;
         _state = State.Reading;
         _progress = null;
         _cts?.Dispose();
@@ -297,19 +311,18 @@
             var document = await reader.ReadAsync(progress, _cts.Token);
             SetArchive(document, "Read from your Microsoft account just now.");
         }
-        catch (AccessTokenNotAvailableException ex)
+        catch (GraphReadInterruptedException ex)
         {
-            ex.Redirect();
-        }
-        catch (OperationCanceledException)
-        {
+            var nothingRead = ex.PartialArchive.Lists.Count == 0;
+            if (ex.InnerException is AccessTokenNotAvailableException tokenEx && nothingRead)
+            {
+                tokenEx.Redirect();
+                return;
+            }
+
             _state = _archive is null ? State.Idle : State.Ready;
-            _error = "Reading was cancelled.";
-        }
-        catch (Exception ex) when (ex is GraphRequestException or HttpRequestException)
-        {
-            _state = _archive is null ? State.Idle : State.Ready;
-            _error = ex.Message;
+            _partial = nothingRead ? null : ex.PartialArchive;
+            _error = ex.WasCancelled ? "Reading was cancelled." : "Reading stopped: " + ex.Reason;
         }
     }
 
@@ -346,6 +359,14 @@
         }
 
         _report = ExportService.Export(_document, _archive, new ExportOptions(SelectedFormats, _includeCompleted)).Report;
+    }
+
+    private async Task DownloadPartialAsync()
+    {
+        if (_partial is not null)
+        {
+            await JS.InvokeVoidAsync("todoExit.download", "archive.partial.json", "application/json", _partial.ToUtf8Bytes());
+        }
     }
 
     private async Task DownloadArchiveAsync()
@@ -402,8 +423,10 @@
             {
                 ReadPhase.Lists => "Reading your lists...",
                 ReadPhase.Tasks => $"Reading tasks in {list}. Tasks read so far: {p.TasksRead}.",
-                ReadPhase.Steps => $"Reading steps in {list}: {p.StepsDone} of {p.StepsTotal} tasks done.",
-                _ => $"Reading attachment details in {list}.",
+                ReadPhase.Steps => $"Reading steps in {list}: {p.Done} of {p.Total} tasks done.",
+                _ => p.Total > 0
+                    ? $"Reading attachment details in {list}: {p.Done} of {p.Total} tasks done."
+                    : $"Reading attachment details in {list}.",
             };
         }
     }
@@ -414,6 +437,7 @@
         ReadErrorKinds.TaskPartial => "Tasks read only in part",
         ReadErrorKinds.StepsUnreadable => "Tasks whose steps could not be read",
         ReadErrorKinds.AttachmentsUnreadable => "Tasks whose attachment details could not be read",
+        ReadErrorKinds.AttachmentsDenied => "Attachment names refused by Microsoft Graph (read-only access)",
         _ => kind,
     };
 

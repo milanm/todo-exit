@@ -144,7 +144,7 @@ public static partial class TodoistCsvExporter
                 $"Start date {Fmt.Date(startDate)} is not carried."));
         }
 
-        if (task.Attachments.Count > 0)
+        if (task.HasAnyAttachment)
         {
             losses.Add(MarkdownExporter.AttachmentLoss(ExportFormatNames.Todoist, list, task));
         }

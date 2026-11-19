@@ -37,6 +37,17 @@ public class GraphTodoReaderTests
 
     private static int SubRequestCount(FakeGraph.Request post) => post.Body!["requests"]!.AsArray().Count;
 
+    private static List<string> SubUrls(FakeGraph graph) =>
+        graph.Posts.SelectMany(p => p.Body!["requests"]!.AsArray()).Select(r => (string)r!["url"]!).ToList();
+
+    /// <summary>A failed read surfaces as GraphReadInterruptedException; returns the Graph error inside it.</summary>
+    private static async Task<GraphRequestException> ReadFailsAsync(GraphTodoReader reader)
+    {
+        var interrupted = await Assert.ThrowsAsync<GraphReadInterruptedException>(() => reader.ReadAsync());
+        Assert.True(interrupted.PartialArchive.ReadNotes.Interrupted);
+        return Assert.IsType<GraphRequestException>(interrupted.InnerException);
+    }
+
     private static List<JsonObject> ArchiveTasks(TodoArchiveDocument doc, int list = 0) =>
         doc.Root["lists"]![list]!["tasks"]!.AsArray().Select(n => n!.AsObject()).ToList();
 
@@ -71,7 +82,7 @@ public class GraphTodoReaderTests
         Assert.Equal(250, ArchiveTasks(doc).Count);
         Assert.False(doc.Root.ContainsKey("readNotes"));
 
-        Assert.Contains(progress, p => p.Phase == ReadPhase.Steps && p.StepsTotal == 250 && p.StepsDone == 250);
+        Assert.Contains(progress, p => p.Phase == ReadPhase.Steps && p.Total == 250 && p.Done == 250);
         Assert.Contains(progress, p => p.Phase == ReadPhase.Tasks && p.TasksRead == 250);
     }
 
@@ -269,10 +280,11 @@ public class GraphTodoReaderTests
         var (reader, _) = Create(graph, includeCompletedSteps: false);
         var doc = await reader.ReadAsync();
 
-        var subUrls = graph.Posts.SelectMany(p => p.Body!["requests"]!.AsArray()).Select(r => (string)r!["url"]!).ToList();
-        Assert.Equal(2, subUrls.Count);
-        Assert.DoesNotContain(subUrls, u => u.Contains("/t1/"));
-        Assert.Contains($"{Base}me/todo/lists/L1/tasks/t1/attachments", graph.Requests.Select(r => r.Url));
+        var stepUrls = SubUrls(graph).Where(u => u.EndsWith("/checklistItems", StringComparison.Ordinal)).ToList();
+        Assert.Equal(2, stepUrls.Count);
+        Assert.DoesNotContain(stepUrls, u => u.Contains("/t1/"));
+        Assert.Contains("/me/todo/lists/L1/tasks/t1/attachments", SubUrls(graph));
+        Assert.Equal("f.png", (string)ArchiveTasks(doc)[1]["attachments"]![0]!["name"]!);
 
         Assert.Empty(ArchiveTasks(doc)[1]["checklistItems"]!.AsArray());
         Assert.True((bool)doc.Root["readNotes"]!["stepsForCompletedTasksSkipped"]!);
@@ -506,7 +518,7 @@ public class GraphTodoReaderTests
         };
 
         var (reader, delays) = Create(graph);
-        var ex = await Assert.ThrowsAsync<GraphRequestException>(() => reader.ReadAsync());
+        var ex = await ReadFailsAsync(reader);
 
         Assert.Equal(new[] { 7, 7, 8, 16, 32, 64, 128, 128, 128, 128 }.Select(x => TimeSpan.FromSeconds(x)), delays);
         Assert.Equal(11, graph.Requests.Count);
@@ -520,7 +532,7 @@ public class GraphTodoReaderTests
         graph.Intercept = (_, _) => FakeGraph.Json("""{ "error": { "code": "InternalServerError", "message": "oops" } }""", HttpStatusCode.InternalServerError);
 
         var (reader, delays) = Create(graph);
-        var ex = await Assert.ThrowsAsync<GraphRequestException>(() => reader.ReadAsync());
+        var ex = await ReadFailsAsync(reader);
 
         Assert.Equal(new[] { 2, 4, 8, 16, 32 }.Select(x => TimeSpan.FromSeconds(x)), delays);
         Assert.Equal(6, graph.Requests.Count);
@@ -537,7 +549,7 @@ public class GraphTodoReaderTests
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "secret-token-value");
         var reader = new GraphTodoReader(http, (_, _) => Task.CompletedTask);
 
-        var ex = await Assert.ThrowsAsync<GraphRequestException>(() => reader.ReadAsync());
+        var ex = await ReadFailsAsync(reader);
         Assert.Equal(HttpStatusCode.Unauthorized, ex.StatusCode);
         Assert.Contains("401", ex.Message);
         Assert.Contains("missing, invalid or expired", ex.Message);
@@ -556,7 +568,9 @@ public class GraphTodoReaderTests
         await reader.ReadAsync();
 
         Assert.Equal(1, GraphTodoReader.MaxBatchesInFlight);
-        Assert.Equal(10, graph.Posts.Count());
+        Assert.Equal(11, graph.Posts.Count()); // 10 step batches + 1 attachment batch (4 tasks)
+        Assert.Equal(4, SubRequestCount(graph.Posts.Last()));
+        Assert.All(graph.Posts.Last().Body!["requests"]!.AsArray(), r => Assert.EndsWith("/attachments", (string)r!["url"]!));
         Assert.Equal(1, graph.MaxBatchesInFlight);
         Assert.Equal(1, graph.MaxRequestsInFlight);
     }
@@ -593,8 +607,9 @@ public class GraphTodoReaderTests
         var doc = await reader.ReadAsync();
 
         var urls = graph.Requests.Select(r => r.Url).ToList();
-        Assert.Contains($"{Base}me/todo/lists/L1/tasks/t0/attachments", urls);
-        Assert.DoesNotContain($"{Base}me/todo/lists/L1/tasks/t1/attachments", urls);
+        Assert.Contains("/me/todo/lists/L1/tasks/t0/attachments", SubUrls(graph));
+        Assert.DoesNotContain("/me/todo/lists/L1/tasks/t1/attachments", SubUrls(graph));
+        Assert.DoesNotContain(urls, u => u.EndsWith("/attachments", StringComparison.Ordinal));
         var archive = ArchiveParser.Parse(doc, TimeZoneInfo.Utc);
         Assert.Equal("f.png", archive.Lists[0].Tasks[0].Attachments.Single().Name);
         Assert.Empty(archive.Lists[0].Tasks[1].Attachments);
@@ -611,7 +626,7 @@ public class GraphTodoReaderTests
         graph.Intercept = (_, _) => FakeGraph.Json($$"""{ "value": [ { "id": "L1", "displayName": "One" } ], "@odata.nextLink": "{{nextLink}}" }""");
 
         var (reader, _) = Create(graph);
-        var ex = await Assert.ThrowsAsync<GraphRequestException>(() => reader.ReadAsync());
+        var ex = await ReadFailsAsync(reader);
 
         Assert.Contains("nextLink", ex.Message);
         Assert.Contains(expectedInMessage, ex.Message);
@@ -629,7 +644,7 @@ public class GraphTodoReaderTests
             : null;
 
         var (reader, _) = Create(graph);
-        var ex = await Assert.ThrowsAsync<GraphRequestException>(() => reader.ReadAsync());
+        var ex = await ReadFailsAsync(reader);
         Assert.Contains("evil.example.com", ex.Message);
     }
 

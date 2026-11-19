@@ -10,33 +10,55 @@ namespace TodoExit.Cli;
 
 public static class Program
 {
-    private const int ExitOk = 0;
-    private const int ExitUsage = 1;
-    private const int ExitFailure = 2;
+    internal const int ExitOk = 0;
+    internal const int ExitUsage = 1;
+    internal const int ExitFailure = 2;
+    internal const int ExitInterrupted = 3;
+
+    internal const string PartialArchiveFileName = "archive.partial.json";
 
     private const string Usage = """
         todo-exit: export Microsoft To Do to files
 
         Usage:
           todo-exit inventory (--token <t> | --token-file <path> | --from-archive <file>) [--timezone <IANA id>]
-                              [--skip-completed-steps]
+                              [--skip-completed-steps] [--resume <file>] [--out <dir>]
           todo-exit export    (--token <t> | --token-file <path> | --from-archive <file>) --out <dir>
                               [--formats json,markdown,todoist,csv] [--include-completed] [--timezone <IANA id>]
-                              [--skip-completed-steps]
+                              [--skip-completed-steps] [--resume <file>]
 
         Options:
           --token <t>           Microsoft Graph access token with Tasks.Read. Can also come from TODOEXIT_TOKEN.
           --token-file <path>   Read the token from a file.
-          --from-archive <file> Read a todo-exit archive.json instead of calling Microsoft Graph.
-          --out <dir>           Output directory for export.
+          --from-archive <file> Read a todo-exit archive.json (or archive.partial.json) instead of calling Microsoft Graph.
+          --resume <file>       Continue an interrupted read from archive.partial.json. Needs a token.
+          --out <dir>           Output directory. For inventory, only used to save a partial archive.
           --formats <list>      Comma-separated: json, markdown, todoist, csv. Default: all four.
           --include-completed   Write completed tasks and checked steps to the Todoist CSV as open tasks.
           --skip-completed-steps Do not read steps of completed tasks (faster for large accounts).
           --timezone <id>       Time zone for dates, e.g. Europe/Belgrade. Default: this computer's zone.
           -h, --help            Show this help.
+
+        Exit codes: 0 success, 1 usage error, 2 failure, 3 interrupted (partial archive saved).
         """;
 
     public static async Task<int> Main(string[] args)
+    {
+        using var cts = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, e) =>
+        {
+            // Ctrl+C stops the read; what was read is saved as a partial archive.
+            e.Cancel = true;
+            cts.Cancel();
+        };
+
+        return await RunAsync(args, Console.Out, Console.Error, handler: null, cts.Token);
+    }
+
+    /// <summary>The whole command. <paramref name="handler"/> replaces the network for tests.</summary>
+    internal static async Task<int> RunAsync(
+        string[] args, TextWriter stdout, TextWriter stderr, HttpMessageHandler? handler, CancellationToken cancellationToken,
+        Func<TimeSpan, CancellationToken, Task>? delay = null)
     {
         Options options;
         try
@@ -45,105 +67,143 @@ public static class Program
         }
         catch (UsageException ex)
         {
-            Console.Error.WriteLine($"error: {ex.Message}");
-            Console.Error.WriteLine();
-            Console.Error.WriteLine(Usage);
+            await stderr.WriteLineAsync($"error: {ex.Message}");
+            await stderr.WriteLineAsync();
+            await stderr.WriteLineAsync(Usage);
             return ExitUsage;
         }
 
         if (options.Help)
         {
-            Console.WriteLine(Usage);
+            await stdout.WriteLineAsync(Usage);
             return ExitOk;
         }
 
-        using var cts = new CancellationTokenSource();
-        Console.CancelKeyPress += (_, e) =>
-        {
-            e.Cancel = true;
-            cts.Cancel();
-        };
-
         try
         {
-            var document = await LoadAsync(options, cts.Token);
+            TodoArchiveDocument document;
+            try
+            {
+                document = await LoadAsync(options, stderr, handler, delay, cancellationToken);
+            }
+            catch (GraphReadInterruptedException ex)
+            {
+                await stderr.WriteLineAsync();
+                await stderr.WriteLineAsync(ex.WasCancelled ? "Cancelled." : $"The read stopped: {ex.Reason}");
+                var outDir = Path.GetFullPath(options.OutDir ?? ".");
+                Directory.CreateDirectory(outDir);
+                var partialPath = Path.Combine(outDir, PartialArchiveFileName);
+                await File.WriteAllBytesAsync(partialPath, ex.PartialArchive.ToUtf8Bytes(), CancellationToken.None);
+                await stderr.WriteLineAsync(
+                    $"Saved what was read to {partialPath}. Get a new token and run the same command with --resume \"{partialPath}\".");
+                return ExitInterrupted;
+            }
+
             var archive = ArchiveParser.Parse(document, options.TimeZone);
+            if (archive.ReadNotes.Interrupted)
+            {
+                await stderr.WriteLineAsync($"Note: this archive is incomplete. The read stopped: {archive.ReadNotes.InterruptedReason}");
+            }
 
             if (options.Command == "inventory")
             {
-                Console.Write(FormatInventory(Inventory.From(archive)));
+                await stdout.WriteAsync(FormatInventory(Inventory.From(archive)));
+                await WriteResumeDoneAsync(options, stdout);
                 return ExitOk;
             }
 
             var result = ExportService.Export(document, archive, new ExportOptions(options.Formats, options.IncludeCompleted));
-            var outDir = Path.GetFullPath(options.OutDir!);
+            var exportDir = Path.GetFullPath(options.OutDir!);
             foreach (var file in result.Files)
             {
-                var path = Path.Combine(outDir, file.Path.Replace('/', Path.DirectorySeparatorChar));
+                var path = Path.Combine(exportDir, file.Path.Replace('/', Path.DirectorySeparatorChar));
                 Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                await File.WriteAllBytesAsync(path, file.Content, cts.Token);
+                await File.WriteAllBytesAsync(path, file.Content, cancellationToken);
             }
 
-            Console.WriteLine($"Wrote {result.Files.Count} files to {outDir}");
+            await stdout.WriteLineAsync($"Wrote {result.Files.Count} files to {exportDir}");
             foreach (var file in result.Files)
             {
-                Console.WriteLine("  " + file.Path);
+                await stdout.WriteLineAsync("  " + file.Path);
             }
 
             var losses = result.Report.Losses;
-            Console.WriteLine(losses.Count == 0
+            await stdout.WriteLineAsync(losses.Count == 0
                 ? "Nothing was lost in the selected formats."
                 : $"{losses.Count} items could not be carried over in full. See report.md.");
+            await WriteResumeDoneAsync(options, stdout);
             return ExitOk;
         }
         catch (OperationCanceledException)
         {
-            Console.Error.WriteLine("Cancelled.");
+            await stderr.WriteLineAsync("Cancelled.");
             return ExitFailure;
         }
         catch (Exception ex) when (ex is GraphRequestException or InvalidDataException or IOException
                                        or UnauthorizedAccessException or HttpRequestException)
         {
-            Console.Error.WriteLine($"error: {ex.Message}");
+            await stderr.WriteLineAsync($"error: {ex.Message}");
             return ExitFailure;
         }
     }
 
-    private static async Task<TodoArchiveDocument> LoadAsync(Options options, CancellationToken cancellationToken)
+    private static async Task WriteResumeDoneAsync(Options options, TextWriter stdout)
+    {
+        if (options.ResumePath is { } resume)
+        {
+            await stdout.WriteLineAsync($"The read is complete. You can remove {Path.GetFullPath(resume)}.");
+        }
+    }
+
+    private static async Task<TodoArchiveDocument> LoadAsync(
+        Options options, TextWriter stderr, HttpMessageHandler? handler, Func<TimeSpan, CancellationToken, Task>? delay,
+        CancellationToken cancellationToken)
     {
         if (options.ArchivePath is { } archivePath)
         {
-            if (!File.Exists(archivePath))
-            {
-                throw new IOException($"Archive file not found: {archivePath}");
-            }
+            return await LoadFileAsync(archivePath, cancellationToken);
+        }
 
-            await using var stream = File.OpenRead(archivePath);
-            return await TodoArchiveDocument.LoadAsync(stream, cancellationToken);
+        TodoArchiveDocument? resume = null;
+        if (options.ResumePath is { } resumePath)
+        {
+            resume = await LoadFileAsync(resumePath, cancellationToken);
         }
 
         var token = options.Token!;
-        using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(2) };
+        using var http = handler is null ? new HttpClient() : new HttpClient(handler, disposeHandler: false);
+        http.Timeout = TimeSpan.FromMinutes(2);
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
         http.DefaultRequestHeaders.UserAgent.ParseAdd("todo-exit/0.1");
 
-        var reader = new GraphTodoReader(http) { IncludeStepsForCompletedTasks = !options.SkipCompletedSteps };
-        var progress = new SyncProgress<ReadProgress>(p => Console.Error.Write("\r" + FormatProgress(p).PadRight(90)));
+        var reader = new GraphTodoReader(http, delay) { IncludeStepsForCompletedTasks = !options.SkipCompletedSteps };
+        var progress = new SyncProgress<ReadProgress>(p => stderr.Write("\r" + FormatProgress(p).PadRight(90)));
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-        var document = await reader.ReadAsync(progress, cancellationToken);
+        var document = await reader.ReadAsync(progress, cancellationToken, resume);
         stopwatch.Stop();
 
         var lists = document.Lists.Count;
         var tasks = document.Lists.OfType<System.Text.Json.Nodes.JsonObject>()
             .Sum(l => (l["tasks"] as System.Text.Json.Nodes.JsonArray)?.Count ?? 0);
         var errors = document.ReadNotes.Errors.Count;
-        Console.Error.WriteLine();
-        Console.Error.WriteLine(
+        await stderr.WriteLineAsync();
+        await stderr.WriteLineAsync(
             $"Read {lists} lists and {tasks} tasks in {stopwatch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s. " +
             (errors == 0 ? "No read errors." : $"{errors} read errors, listed in report.md."));
 
         return document;
+    }
+
+    private static async Task<TodoArchiveDocument> LoadFileAsync(string path, CancellationToken cancellationToken)
+    {
+        if (!File.Exists(path))
+        {
+            throw new IOException($"Archive file not found: {path}");
+        }
+
+        await using var stream = File.OpenRead(path);
+        return await TodoArchiveDocument.LoadAsync(stream, cancellationToken);
     }
 
     internal static string FormatProgress(ReadProgress p)
@@ -159,8 +219,10 @@ public static class Program
         {
             ReadPhase.Lists => "Reading lists...",
             ReadPhase.Tasks => $"Reading tasks: {position}, {p.TasksRead} tasks",
-            ReadPhase.Steps => $"Reading steps: {position}, {p.StepsDone}/{p.StepsTotal} tasks",
-            _ => $"Reading attachments: {position}, {p.TasksRead} tasks",
+            ReadPhase.Steps => $"Reading steps: {position}, {p.Done}/{p.Total} tasks",
+            _ => p.Total > 0
+                ? $"Reading attachment details: {position}, {p.Done}/{p.Total} tasks"
+                : $"Reading attachment details: {position}, {p.TasksRead} tasks",
         };
     }
 
@@ -234,6 +296,8 @@ internal sealed class Options
 
     public bool SkipCompletedSteps { get; private set; }
 
+    public string? ResumePath { get; private set; }
+
     public TimeZoneInfo TimeZone { get; private set; } = TimeZoneInfo.Local;
 
     public static Options Parse(string[] args)
@@ -301,7 +365,10 @@ internal sealed class Options
                 case "--timezone":
                     timezone = Value();
                     break;
-                case "--out" when o.Command == "export":
+                case "--resume":
+                    o.ResumePath = Value();
+                    break;
+                case "--out":
                     o.OutDir = Value();
                     break;
                 case "--formats" when o.Command == "export":
@@ -332,6 +399,11 @@ internal sealed class Options
         if (sources > 1)
         {
             throw new UsageException("use only one of --token, --token-file and --from-archive");
+        }
+
+        if (archive is not null && o.ResumePath is not null)
+        {
+            throw new UsageException("--resume continues a read from Microsoft Graph and needs a token, not --from-archive");
         }
 
         if (archive is not null)

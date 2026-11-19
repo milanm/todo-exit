@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\TodoExit.Core\TodoExit.Core.csproj" />
+    <ProjectReference Include="..\..\src\TodoExit.Cli\TodoExit.Cli.csproj" />
   </ItemGroup>
 
 </Project>

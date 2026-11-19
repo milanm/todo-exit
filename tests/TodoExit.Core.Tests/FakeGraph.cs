@@ -57,6 +57,11 @@ internal sealed class FakeGraph : HttpMessageHandler
     /// <summary>Task ids whose batch sub-response is 404.</summary>
     public HashSet<string> NotFound { get; } = new();
 
+    /// <summary>When set, every attachments request (GET or batch sub-request) answers this status. Live: 401 accessDenied.</summary>
+    public HttpStatusCode? AttachmentsStatus { get; set; }
+
+    public string AttachmentsErrorCode { get; set; } = "accessDenied";
+
     /// <summary>When set, every $batch POST returns this status.</summary>
     public HttpStatusCode? BatchStatus { get; set; }
 
@@ -84,6 +89,8 @@ internal sealed class FakeGraph : HttpMessageHandler
         _lists.Add(list);
         return list;
     }
+
+    public void RemoveList(string id) => _lists.RemoveAll(l => l.Id == id);
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
@@ -264,6 +271,11 @@ internal sealed class FakeGraph : HttpMessageHandler
                 }
 
                 return (HttpStatusCode.OK, result.ToJsonString());
+            }
+
+            if (segments[6] == "attachments" && AttachmentsStatus is { } denied)
+            {
+                return (denied, "{\"error\":{\"code\":\"" + AttachmentsErrorCode + "\",\"message\":\"Access denied\"}}");
             }
 
             if (segments[6] == "attachments")
