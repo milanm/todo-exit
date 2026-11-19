@@ -59,10 +59,11 @@ As of 2026-11-19:
   - a resumed read continued at a stored position and could miss tasks when the list had changed
   - team projects counted against the personal Todoist project limit
 - The outage fix was also run against a separate simulated Graph in eight failure scenarios, and the new reader read the test account from the hosted site with the same counts as before.
+- After those fixes, on the real Todoist API with the command-line tool: all four lists of the sample data into four projects in one run, with completed tasks (26 tasks, 8 sub-tasks, 7 completed), read back and matching; and a real list of 86 tasks and 258 sub-tasks, split into two projects, interrupted while the first request was in flight and then continued. Every task and sub-task arrived once.
 - Checked on the real Todoist API: an incremental sync returns new, completed and deleted tasks; a sync token works when more resource types are added later; an unknown token gives a full sync; a sub-task whose parent does not exist is refused with PARENT_NOT_FOUND.
 - The unit tests run on Linux and Windows on every push.
 
-Not tested yet: work and school accounts, Todoist reminders on a paid plan, a transfer into more than one free project at once on the real API, browsers that are not based on Chromium, and `--resume` against the real Graph (it is covered by tests against a fake one).
+Not tested yet: work and school accounts, Todoist reminders on a paid plan, team projects, temporary errors of the real Todoist API (simulated only), browsers that are not based on Chromium, and `--resume` against the real Graph (it is covered by tests against a fake one).
 
 ### Microsoft Graph behavior observed
 
