@@ -1,8 +1,10 @@
 # todo-exit
 
-Export everything in your Microsoft To Do account to files you keep.
+Export everything in your Microsoft To Do account to files you keep, or send it straight to Todoist.
 
-Microsoft retires the Microsoft To Do apps on June 30, 2027. Personal Microsoft accounts get no replacement app, and your tasks do not move to another service by themselves. todo-exit reads your lists and tasks with read-only access and writes them to your own device.
+Microsoft retires the Microsoft To Do apps on June 30, 2027 ([Microsoft's announcement](https://support.microsoft.com/en-us/planner/to-do-to-planner)). Personal Microsoft accounts get no replacement app, and existing tasks do not migrate to Planner. Microsoft says it will provide its own export before the apps retire. The details are not published yet, and Microsoft notes that an export does not mean the content can be imported into another app.
+
+todo-exit reads your lists and tasks with read-only access and writes them to your own device, in open formats, with a report of what each format could not carry over. It works through the To Do API in Microsoft Graph. Microsoft says the To Do service and its API retire later than the apps, on dates it has not given yet.
 
 **Use it in your browser: https://milanm.github.io/todo-exit/**
 
