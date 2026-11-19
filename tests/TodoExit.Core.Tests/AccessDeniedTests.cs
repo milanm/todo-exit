@@ -27,8 +27,8 @@ public class AccessDeniedTests
         return graph;
     }
 
-    private static GraphTodoReader Reader(FakeGraph graph) =>
-        new(new HttpClient(graph), (_, _) => Task.CompletedTask, () => DateTimeOffset.UnixEpoch);
+    private static GraphTodoReader Reader(FakeGraph graph, bool verifySteps = false) =>
+        new(new HttpClient(graph), (_, _) => Task.CompletedTask, () => DateTimeOffset.UnixEpoch) { VerifySteps = verifySteps };
 
     private static List<JsonObject> Tasks(TodoArchiveDocument doc) =>
         doc.Lists.OfType<JsonObject>().SelectMany(l => l["tasks"]!.AsArray()).Select(t => t!.AsObject()).ToList();
@@ -184,7 +184,7 @@ public class AccessDeniedTests
                 """)
             : null;
 
-        var doc = await Reader(graph).ReadAsync();
+        var doc = await Reader(graph, verifySteps: true).ReadAsync();
 
         var error = Assert.Single(doc.ReadNotes.Errors);
         Assert.Equal((ReadErrorKinds.StepsUnreadable, "L1-t0"), (error.Kind, error.TaskId!));
@@ -248,8 +248,7 @@ public class AccessDeniedTests
     [Fact]
     public void Exporters_handle_unknown_attachment_names()
     {
-        var notes = new ReadNotes(false,
-            [new ReadError(ReadErrorKinds.AttachmentsDenied, null, null, null, null, null, "Microsoft Graph refused to list attachments with the read-only Tasks.Read permission (401 accessDenied).")])
+        var notes = new ReadNotes([new ReadError(ReadErrorKinds.AttachmentsDenied, null, null, null, null, null, "Microsoft Graph refused to list attachments with the read-only Tasks.Read permission (401 accessDenied).")])
         {
             AttachmentsDenied = true,
         };

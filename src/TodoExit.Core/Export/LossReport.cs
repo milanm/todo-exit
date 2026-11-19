@@ -12,6 +12,9 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
     /// <summary>What could not be read from Microsoft Graph. Applies to every format, the archive included.</summary>
     public ReadNotes ReadNotes { get; init; } = ReadNotes.Empty;
 
+    /// <summary>Most items any one section of report.md lists; the rest are in report.json.</summary>
+    public const int MaxItemsPerSection = 200;
+
     public const string JsonFileName = "report.json";
     public const string MarkdownFileName = "report.md";
 
@@ -64,6 +67,7 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
                 }
 
                 w.WriteString("kind", loss.Kind);
+                w.WriteNumber("count", loss.Count);
                 w.WriteString("message", loss.Message);
                 w.WriteEndObject();
             }
@@ -93,7 +97,6 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
             }
 
             w.WriteEndArray();
-            w.WriteBoolean("stepsForCompletedTasksSkipped", ReadNotes.StepsForCompletedTasksSkipped);
             w.WriteEndObject();
         }
 
@@ -155,29 +158,9 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
                 continue;
             }
 
-            sb.Append("| Kind | Count |\n|---|---:|\n");
-            foreach (var group in items.GroupBy(l => l.Kind).OrderByDescending(g => g.Count()).ThenBy(g => g.Key, StringComparer.Ordinal))
-            {
-                sb.Append("| ").Append(group.Key).Append(" | ").Append(group.Count().ToString(CultureInfo.InvariantCulture)).Append(" |\n");
-            }
-
-            sb.Append('\n');
-            foreach (var byList in items.GroupBy(l => l.List))
-            {
-                sb.Append("#### ").Append(byList.Key).Append("\n\n");
-                foreach (var loss in byList)
-                {
-                    sb.Append("- ");
-                    if (loss.Task is not null)
-                    {
-                        sb.Append("**").Append(EscapeInline(loss.Task)).Append("**: ");
-                    }
-
-                    sb.Append(EscapeInline(loss.Message)).Append(" (`").Append(loss.Kind).Append("`)\n");
-                }
-
-                sb.Append('\n');
-            }
+            AppendKindTable(sb, items.GroupBy(l => l.Kind).Select(g => (g.Key, g.Sum(l => l.Count))));
+            var perTask = items.Where(l => !l.Aggregated).ToList();
+            AppendItems(sb, perTask.Select(l => (l.List, l.Task is null ? null : $"**{EscapeInline(l.Task)}**: ", l.Message, l.Kind)).ToList());
         }
 
         return sb.ToString();
@@ -185,50 +168,167 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
 
     private void AppendReadErrors(StringBuilder sb)
     {
-        if (!ReadNotes.StepsForCompletedTasksSkipped && ReadNotes.Errors.Count == 0)
+        if (ReadNotes.Errors.Count == 0)
         {
             return;
         }
 
         sb.Append("\n## Could not be read from Microsoft Graph\n\n");
         sb.Append("This applies to every format, the JSON archive included.\n\n");
-        if (ReadNotes.StepsForCompletedTasksSkipped)
+        AppendKindTable(sb, ReadNotes.Errors.GroupBy(e => e.Kind).Select(g => (g.Key, g.Count())));
+        AppendItems(sb, ReadNotes.Errors.Select(e => (
+            e.ListName ?? e.ListId ?? "All lists",
+            e.TaskTitle is not null
+                ? $"**{EscapeInline(e.TaskTitle)}**: "
+                : e.Position is { } position ? $"**Task at position {position.ToString(CultureInfo.InvariantCulture)}**: " : null,
+            e.Message,
+            e.Kind)).ToList());
+    }
+
+    private static void AppendKindTable(StringBuilder sb, IEnumerable<(string Kind, int Count)> rows)
+    {
+        sb.Append("| Kind | Count | What it means |\n|---|---:|---|\n");
+        foreach (var (kind, count) in rows.OrderByDescending(r => r.Count).ThenBy(r => r.Kind, StringComparer.Ordinal))
         {
-            sb.Append("Steps of completed tasks were not read, by choice (--skip-completed-steps). Completed tasks have no steps in this export.\n\n");
+            sb.Append("| ").Append(kind).Append(" | ").Append(count.ToString("N0", CultureInfo.InvariantCulture))
+                .Append(" | ").Append(LossCatalog.Meaning(kind)).Append(" |\n");
         }
 
-        if (ReadNotes.Errors.Count == 0)
+        sb.Append('\n');
+    }
+
+    /// <summary>Items grouped by list, at most <see cref="MaxItemsPerSection"/>.</summary>
+    private static void AppendItems(StringBuilder sb, List<(string List, string? Prefix, string Message, string Kind)> items)
+    {
+        if (items.Count == 0)
         {
             return;
         }
 
-        sb.Append("| Kind | Count |\n|---|---:|\n");
-        foreach (var group in ReadNotes.Errors.GroupBy(e => e.Kind).OrderByDescending(g => g.Count()).ThenBy(g => g.Key, StringComparer.Ordinal))
+        var written = 0;
+        foreach (var byList in items.GroupBy(i => i.List))
         {
-            sb.Append("| ").Append(group.Key).Append(" | ").Append(group.Count().ToString(CultureInfo.InvariantCulture)).Append(" |\n");
-        }
-
-        sb.Append('\n');
-        foreach (var byList in ReadNotes.Errors.GroupBy(e => e.ListName ?? e.ListId ?? "(unknown list)"))
-        {
-            sb.Append("#### ").Append(byList.Key).Append("\n\n");
-            foreach (var e in byList)
+            if (written >= MaxItemsPerSection)
             {
-                sb.Append("- ");
-                if (e.TaskTitle is not null)
+                break;
+            }
+
+            sb.Append("#### ").Append(byList.Key).Append("\n\n");
+            foreach (var item in byList)
+            {
+                if (written >= MaxItemsPerSection)
                 {
-                    sb.Append("**").Append(EscapeInline(e.TaskTitle)).Append("**: ");
-                }
-                else if (e.Position is { } position)
-                {
-                    sb.Append("**Task at position ").Append(position.ToString(CultureInfo.InvariantCulture)).Append("**: ");
+                    break;
                 }
 
-                sb.Append(EscapeInline(e.Message)).Append(" (`").Append(e.Kind).Append("`)\n");
+                sb.Append("- ").Append(item.Prefix).Append(EscapeInline(item.Message)).Append(" (`").Append(item.Kind).Append("`)\n");
+                written++;
             }
 
             sb.Append('\n');
         }
+
+        if (items.Count > written)
+        {
+            sb.Append("... and ").Append((items.Count - written).ToString("N0", CultureInfo.InvariantCulture))
+                .Append(" more, see report.json.\n\n");
+        }
+    }
+
+    /// <summary>
+    /// At most three short lines for the end of a CLI run: what the Todoist CSV leaves out or needs by hand, and what
+    /// could not be read. Empty when there is nothing to say.
+    /// </summary>
+    public IReadOnlyList<string> SummaryLines()
+    {
+        static string N(int n) => n.ToString("N0", CultureInfo.InvariantCulture);
+        static string Count(int n, string one, string many) => $"{N(n)} {(n == 1 ? one : many)}";
+        var lines = new List<string>();
+
+        if (Formats.HasFlag(ExportFormats.Todoist))
+        {
+            var todoist = Losses.Where(l => l.Format == ExportFormatNames.Todoist).ToList();
+            int Sum(string kind, bool openOnly = false) =>
+                todoist.Where(l => l.Kind == kind && (!openOnly || (!l.Aggregated && l.TaskIsOpen))).Sum(l => l.Count);
+
+            var parts = new List<string>();
+            var completed = Sum(LossKinds.CompletedSkipped);
+            if (completed > 0)
+            {
+                parts.Add($"{Count(completed, "completed task", "completed tasks")} left out by design");
+            }
+
+            var byHand = new List<string>();
+            var reminders = Sum(LossKinds.ReminderNotCarried, openOnly: true);
+            var attachments = Sum(LossKinds.AttachmentNotCarried, openOnly: true);
+            if (reminders > 0)
+            {
+                byHand.Add(Count(reminders, "reminder", "reminders"));
+            }
+
+            if (attachments > 0)
+            {
+                byHand.Add(Count(attachments, "attachment", "attachments"));
+            }
+
+            if (byHand.Count > 0)
+            {
+                parts.Add(string.Join(" and ", byHand) + " to re-add by hand");
+            }
+
+            var repeats = Sum(LossKinds.RecurrenceApproximated);
+            if (repeats > 0)
+            {
+                parts.Add($"{Count(repeats, "repeat rule", "repeat rules")} to check");
+            }
+
+            if (parts.Count > 0)
+            {
+                lines.Add("Todoist CSV: " + string.Join(", ", parts) + ".");
+            }
+        }
+
+        var read = new List<string>();
+        int Errors(string kind) => ReadNotes.Errors.Count(e => e.Kind == kind);
+        if (Errors(ReadErrorKinds.TaskPartial) is var partial and > 0)
+        {
+            read.Add(partial == 1 ? "1 task was only partly readable" : $"{N(partial)} tasks were only partly readable");
+        }
+
+        if (Errors(ReadErrorKinds.TaskUnreadable) is var unreadable and > 0)
+        {
+            read.Add(unreadable == 1 ? "1 task could not be read" : $"{N(unreadable)} tasks could not be read");
+        }
+
+        if (Errors(ReadErrorKinds.StepsUnreadable) is var steps and > 0)
+        {
+            read.Add($"steps of {Count(steps, "task", "tasks")} could not be read");
+        }
+
+        if (Errors(ReadErrorKinds.AttachmentsUnreadable) is var att and > 0)
+        {
+            read.Add($"attachment details of {Count(att, "task", "tasks")} could not be read");
+        }
+
+        if (ReadNotes.AttachmentsDenied || Errors(ReadErrorKinds.AttachmentsDenied) > 0)
+        {
+            read.Add("attachment names were not available");
+        }
+
+        if (read.Count > 0)
+        {
+            var sentence = read.Count <= 2
+                ? string.Join(" and ", read)
+                : string.Join(", ", read.Take(read.Count - 1)) + " and " + read[^1];
+            lines.Add(char.ToUpperInvariant(sentence[0]) + sentence[1..] + ". Details in report.md.");
+        }
+
+        if (ReadNotes.Interrupted)
+        {
+            lines.Add("The archive is incomplete; run the read again with --resume to finish it.");
+        }
+
+        return lines;
     }
 
     /// <summary>Name (or id) of the list the interrupted read was working on.</summary>

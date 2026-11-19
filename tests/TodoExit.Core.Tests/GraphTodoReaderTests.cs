@@ -11,8 +11,17 @@ public class GraphTodoReaderTests
 {
     private const string Base = FakeGraph.Base;
 
-    private static (GraphTodoReader Reader, List<TimeSpan> Delays) Create(FakeGraph graph, bool includeCompletedSteps = true)
+    /// <summary>
+    /// Most tests here exercise the batch machinery, so by default steps are NOT inline and --verify-steps is on:
+    /// steps then travel through $batch exactly as they did before steps were known to come inline.
+    /// </summary>
+    private static (GraphTodoReader Reader, List<TimeSpan> Delays) Create(FakeGraph graph, bool verifySteps = true)
     {
+        if (verifySteps)
+        {
+            graph.InlineSteps = false;
+        }
+
         var delays = new List<TimeSpan>();
         var reader = new GraphTodoReader(
             new HttpClient(graph),
@@ -27,7 +36,7 @@ public class GraphTodoReaderTests
             },
             () => new DateTimeOffset(2026, 11, 19, 13, 30, 0, TimeSpan.Zero))
         {
-            IncludeStepsForCompletedTasks = includeCompletedSteps,
+            VerifySteps = verifySteps,
         };
         return (reader, delays);
     }
@@ -52,7 +61,78 @@ public class GraphTodoReaderTests
         doc.Root["lists"]![list]!["tasks"]!.AsArray().Select(n => n!.AsObject()).ToList();
 
     [Fact]
-    public async Task Request_sequence_for_250_tasks_uses_top_skip_pages_and_13_batches()
+    public async Task Default_run_reads_steps_inline_and_sends_only_the_page_requests()
+    {
+        var graph = new FakeGraph();
+        graph.AddList("L1", "Big", 250, i => new JsonObject
+        {
+            ["id"] = $"t{i}",
+            ["title"] = $"Task {i}",
+            ["status"] = i < 3 ? "completed" : "notStarted",
+        });
+        graph.Steps["t7"] = StepsFor("inline step");
+
+        var (reader, _) = Create(graph, verifySteps: false);
+        var progress = new List<ReadProgress>();
+        var doc = await reader.ReadAsync(new SyncProgress(progress.Add));
+
+        Assert.Equal(
+        [
+            $"{Base}me/todo/lists",
+            $"{Base}me/todo/lists/L1/tasks?$top=100",
+            $"{Base}me/todo/lists/L1/tasks?$top=100&$skip=100",
+            $"{Base}me/todo/lists/L1/tasks?$top=100&$skip=200",
+        ], graph.Requests.Select(r => r.Url));
+        Assert.Empty(graph.Posts);
+        Assert.Equal("inline", reader.StepReadMode);
+        Assert.False(doc.Root.ContainsKey("readNotes"));
+
+        var tasks = ArchiveTasks(doc);
+        Assert.Equal("inline step", (string)tasks[7]["checklistItems"]![0]!["displayName"]!);
+        Assert.True(tasks[7].ContainsKey("checklistItems@odata.context"));
+        Assert.All(tasks.Where((_, i) => i != 7), t => Assert.Empty(t["checklistItems"]!.AsArray()));
+        Assert.DoesNotContain(progress, p => p.Phase == ReadPhase.Steps);
+        Assert.Equal([ReadPhase.Lists, ReadPhase.Tasks, ReadPhase.Attachments], progress.Select(p => p.Phase).Distinct());
+    }
+
+    [Fact]
+    public async Task Verify_steps_reads_only_tasks_without_inline_steps_and_counts_what_it_finds()
+    {
+        var graph = new FakeGraph();
+        graph.AddList("L1", "One", 5);
+        graph.Steps["L1-t1"] = StepsFor("inline");
+        graph.Steps["L1-t3"] = StepsFor("hidden");
+        graph.Intercept = null;
+
+        var reader = new GraphTodoReader(new HttpClient(graph), (_, _) => Task.CompletedTask) { VerifySteps = true };
+        // t3's steps are not inline on this "account": model it by removing them from the page only.
+        graph.InlineSteps = true;
+        var hidden = graph.Steps["L1-t3"];
+        graph.Steps.Remove("L1-t3");
+        graph.Intercept = (r, _) =>
+        {
+            if (r.Method == "POST")
+            {
+                graph.Steps["L1-t3"] = hidden; // the endpoint knows them
+            }
+
+            return null;
+        };
+
+        var doc = await reader.ReadAsync();
+
+        var stepUrls = SubUrls(graph).Where(u => u.EndsWith("/checklistItems", StringComparison.Ordinal)).ToList();
+        Assert.Equal(4, stepUrls.Count);
+        Assert.DoesNotContain("/me/todo/lists/L1/tasks/L1-t1/checklistItems", stepUrls);
+        Assert.Equal(1, reader.StepsFoundByVerification);
+        Assert.Equal(1, doc.ReadNotes.StepsFoundByVerification);
+        Assert.Equal(1, (int)doc.Root["readNotes"]!["stepsFoundByVerification"]!);
+        Assert.Equal("hidden", (string)ArchiveTasks(doc)[3]["checklistItems"]![0]!["displayName"]!);
+        Assert.Equal("inline", (string)ArchiveTasks(doc)[1]["checklistItems"]![0]!["displayName"]!);
+    }
+
+    [Fact]
+    public async Task Request_sequence_for_250_tasks_with_verify_steps_uses_13_batches()
     {
         var graph = new FakeGraph();
         graph.AddList("L1", "Big", 250, i => new JsonObject
@@ -140,7 +220,7 @@ public class GraphTodoReaderTests
             "/me/todo/lists/L1/tasks/L1-t7/checklistItems",
         ], retry);
         Assert.Equal("five", ArchiveParser.Parse(doc, TimeZoneInfo.Utc).Lists[0].Tasks[5].Steps.Single().Title);
-        Assert.True(doc.ReadNotes.IsEmpty);
+        Assert.Empty(doc.ReadNotes.Errors);
     }
 
     [Fact]
@@ -264,31 +344,24 @@ public class GraphTodoReaderTests
     }
 
     [Fact]
-    public async Task Skipping_steps_of_completed_tasks_sends_no_request_for_them_and_is_recorded()
+    public async Task Default_run_sends_no_batch_when_no_task_has_attachments_and_one_for_attachments_otherwise()
     {
         var graph = new FakeGraph();
-        graph.AddList("L1", "One", 3, i => new JsonObject
-        {
-            ["id"] = $"t{i}",
-            ["title"] = $"T{i}",
-            ["status"] = i == 1 ? "completed" : "notStarted",
-            ["hasAttachments"] = i == 1,
-        });
-        graph.Steps["t1"] = StepsFor("never read");
-        graph.Attachments["t1"] = new JsonArray((JsonNode)new JsonObject { ["id"] = "a", ["name"] = "f.png", ["size"] = 3 });
+        graph.AddList("L1", "One", 3);
+        graph.Steps["L1-t0"] = StepsFor("s");
+        var (reader, _) = Create(graph, verifySteps: false);
+        await reader.ReadAsync();
+        Assert.Empty(graph.Posts);
+        Assert.DoesNotContain(graph.Requests, r => r.Url.Contains("checklistItems"));
 
-        var (reader, _) = Create(graph, includeCompletedSteps: false);
+        var withAttachments = new FakeGraph();
+        withAttachments.AddList("L1", "One", 3, i => new JsonObject { ["id"] = $"t{i}", ["title"] = $"T{i}", ["hasAttachments"] = i == 1 });
+        withAttachments.Attachments["t1"] = new JsonArray((JsonNode)new JsonObject { ["id"] = "a", ["name"] = "f.png", ["size"] = 3 });
+        (reader, _) = Create(withAttachments, verifySteps: false);
         var doc = await reader.ReadAsync();
 
-        var stepUrls = SubUrls(graph).Where(u => u.EndsWith("/checklistItems", StringComparison.Ordinal)).ToList();
-        Assert.Equal(2, stepUrls.Count);
-        Assert.DoesNotContain(stepUrls, u => u.Contains("/t1/"));
-        Assert.Contains("/me/todo/lists/L1/tasks/t1/attachments", SubUrls(graph));
+        Assert.Equal(["/me/todo/lists/L1/tasks/t1/attachments"], SubUrls(withAttachments));
         Assert.Equal("f.png", (string)ArchiveTasks(doc)[1]["attachments"]![0]!["name"]!);
-
-        Assert.Empty(ArchiveTasks(doc)[1]["checklistItems"]!.AsArray());
-        Assert.True((bool)doc.Root["readNotes"]!["stepsForCompletedTasksSkipped"]!);
-        Assert.True(doc.ReadNotes.StepsForCompletedTasksSkipped);
         Assert.Empty(doc.ReadNotes.Errors);
     }
 

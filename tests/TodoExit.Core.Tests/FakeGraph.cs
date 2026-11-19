@@ -316,7 +316,7 @@ internal sealed class FakeGraph : HttpMessageHandler
                 return (HttpStatusCode.OK, head + BrokenTask(list.Tasks[i], kind));
             }
 
-            parts.Add(list.Tasks[i].ToJsonString());
+            parts.Add(WithInlineSteps(list.Tasks[i]).ToJsonString());
         }
 
         var page = "{\"value\":[" + string.Join(",", parts) + "]";
@@ -326,6 +326,24 @@ internal sealed class FakeGraph : HttpMessageHandler
         }
 
         return (HttpStatusCode.OK, page + "}");
+    }
+
+    /// <summary>
+    /// Like the live API: task pages carry "checklistItems" (with its @odata.context) only on tasks that have steps.
+    /// Set to false to model an account where steps are not inline, so only --verify-steps finds them.
+    /// </summary>
+    public bool InlineSteps { get; set; } = true;
+
+    private JsonObject WithInlineSteps(JsonObject task)
+    {
+        var copy = task.DeepClone().AsObject();
+        if (InlineSteps && copy["id"] is JsonValue idValue && Steps.TryGetValue((string)idValue!, out var steps) && steps.Count > 0)
+        {
+            copy["checklistItems@odata.context"] = "https://graph.microsoft.com/v1.0/$metadata#checklistItems";
+            copy["checklistItems"] = steps.DeepClone();
+        }
+
+        return copy;
     }
 
     public const string AppendedError =

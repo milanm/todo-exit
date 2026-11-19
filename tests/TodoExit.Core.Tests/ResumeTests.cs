@@ -42,10 +42,10 @@ public class ResumeTests
         return graph;
     }
 
-    private static GraphTodoReader Reader(FakeGraph graph, bool includeCompletedSteps = true) =>
+    private static GraphTodoReader Reader(FakeGraph graph, bool verifySteps = false) =>
         new(new HttpClient(graph), (_, _) => Task.CompletedTask, () => new DateTimeOffset(2026, 11, 20, 8, 0, 0, TimeSpan.Zero))
         {
-            IncludeStepsForCompletedTasks = includeCompletedSteps,
+            VerifySteps = verifySteps,
         };
 
     private static HttpResponseMessage Unauthorized() =>
@@ -59,11 +59,15 @@ public class ResumeTests
         return root;
     }
 
-    private static TodoArchiveDocument Baseline(int? poisonedAt = null) =>
-        Reader(Account(poisonedAt)).ReadAsync().GetAwaiter().GetResult();
+    private static TodoArchiveDocument Baseline(int? poisonedAt = null, bool verifySteps = false)
+    {
+        var graph = Account(poisonedAt);
+        graph.InlineSteps = !verifySteps;
+        return Reader(graph, verifySteps).ReadAsync().GetAwaiter().GetResult();
+    }
 
     /// <summary>Runs a read that is interrupted by the intercept, and returns the partial archive after a file round trip.</summary>
-    private static async Task<TodoArchiveDocument> InterruptAsync(FakeGraph graph, Func<FakeGraph.Request, bool> failWhen)
+    private static async Task<TodoArchiveDocument> InterruptAsync(FakeGraph graph, Func<FakeGraph.Request, bool> failWhen, bool verifySteps = false)
     {
         var fired = false;
         graph.Intercept = (r, _) =>
@@ -77,7 +81,7 @@ public class ResumeTests
             return null;
         };
 
-        var ex = await Assert.ThrowsAsync<GraphReadInterruptedException>(() => Reader(graph).ReadAsync());
+        var ex = await Assert.ThrowsAsync<GraphReadInterruptedException>(() => Reader(graph, verifySteps).ReadAsync());
         graph.Intercept = null;
         Assert.IsType<GraphRequestException>(ex.InnerException);
         Assert.Contains("401", ex.Reason);
@@ -132,11 +136,12 @@ public class ResumeTests
     }
 
     [Fact]
-    public async Task Interrupted_during_steps_then_resumed_without_rereading_finished_steps()
+    public async Task Interrupted_during_step_verification_then_resumed_without_rereading_finished_steps()
     {
         var graph = Account();
+        graph.InlineSteps = false;
         var posts = 0;
-        var partial = await InterruptAsync(graph, r => r.Method == "POST" && ++posts == 3);
+        var partial = await InterruptAsync(graph, r => r.Method == "POST" && ++posts == 3, verifySteps: true);
 
         Assert.Equal(new ListReadProgress("L1", true, 230, false, false), ProgressOf(partial, "L1"));
         var tasks = Tasks(partial, "L1");
@@ -144,10 +149,11 @@ public class ResumeTests
         Assert.Equal(40, tasks.Count(t => t["checklistItems"] is JsonArray));
 
         var mark = graph.Requests.Count;
-        var resumed = await Reader(graph).ReadAsync(resumeFrom: partial);
+        var resumed = await Reader(graph, verifySteps: true).ReadAsync(resumeFrom: partial);
         var after = graph.Requests.Skip(mark).ToList();
 
-        Assert.True(JsonNode.DeepEquals(Normalized(Baseline()), Normalized(resumed)));
+        Assert.True(JsonNode.DeepEquals(Normalized(Baseline(verifySteps: true)), Normalized(resumed)));
+        Assert.Equal(33, resumed.ReadNotes.StepsFoundByVerification);
         Assert.DoesNotContain(after, r => r.Url.StartsWith($"{Base}me/todo/lists/L1/tasks?", StringComparison.Ordinal));
         var stepUrls = SubUrls(after).Where(u => u.EndsWith("/checklistItems", StringComparison.Ordinal) && u.Contains("/L1/")).ToList();
         Assert.Equal(190, stepUrls.Count);
@@ -221,9 +227,29 @@ public class ResumeTests
     }
 
     [Fact]
+    public async Task Resuming_a_partial_archive_without_steps_sends_no_step_requests_by_default()
+    {
+        var graph = Account();
+        graph.InlineSteps = false;
+        var posts = 0;
+        var partial = await InterruptAsync(graph, r => r.Method == "POST" && ++posts == 2, verifySteps: true);
+        Assert.Contains(Tasks(partial, "L1"), t => t["checklistItems"] is null);
+
+        var mark = graph.Requests.Count;
+        var resumed = await Reader(graph).ReadAsync(resumeFrom: partial);
+        var after = graph.Requests.Skip(mark).ToList();
+
+        Assert.DoesNotContain(SubUrls(after), u => u.EndsWith("/checklistItems", StringComparison.Ordinal));
+        Assert.DoesNotContain(after, r => r.Url.Contains("checklistItems"));
+        Assert.All(Tasks(resumed, "L1"), t => Assert.IsType<JsonArray>(t["checklistItems"]));
+        Assert.False(resumed.ReadNotes.Interrupted);
+    }
+
+    [Fact]
     public async Task Cancellation_produces_a_partial_archive()
     {
         var graph = Account();
+        graph.InlineSteps = false;
         using var cts = new CancellationTokenSource();
         var posts = 0;
         graph.Intercept = (r, _) =>
@@ -236,7 +262,7 @@ public class ResumeTests
             return null;
         };
 
-        var ex = await Assert.ThrowsAsync<GraphReadInterruptedException>(() => Reader(graph).ReadAsync(cancellationToken: cts.Token));
+        var ex = await Assert.ThrowsAsync<GraphReadInterruptedException>(() => Reader(graph, verifySteps: true).ReadAsync(cancellationToken: cts.Token));
 
         Assert.True(ex.WasCancelled);
         Assert.Equal("The read was cancelled.", ex.Reason);
@@ -291,7 +317,7 @@ public class ResumeTests
     [Fact]
     public void Partial_archive_read_notes_round_trip()
     {
-        var notes = new ReadNotes(false, [])
+        var notes = new ReadNotes([])
         {
             Interrupted = true,
             InterruptedReason = "token expired",

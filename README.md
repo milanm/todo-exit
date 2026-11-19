@@ -57,12 +57,12 @@ All of this is recorded in a "Could not be read from Microsoft Graph" section at
 | `attachments-unreadable` | The list of attachment names could not be read for one task. |
 | `attachments-denied` | Graph refused to list attachments with read-only access. Recorded once; tasks with attachments are still marked. |
 
-If you used `--skip-completed-steps`, the report says so in one line.
+Kinds that apply to many tasks at once (completed tasks left out, attachments, checked steps, reminders, start dates) are counted per list instead of listed one by one. The exception is the Todoist CSV: reminders and attachments of open tasks are listed by task, because you re-add those by hand. No section of `report.md` lists more than 200 items; the full list is in `report.json`.
 
 ## Privacy
 
 - todo-exit asks for one permission: `Tasks.Read`. It can read your tasks. It cannot change or delete them.
-- Every request it makes is read-only. Steps and attachment details are read through Graph's batch endpoint (`POST /$batch`), which bundles up to 20 read requests into one call. The batch contains only reads.
+- Every request it makes is read-only. Steps come with the task pages. Attachment details (and the extra step check of `--verify-steps`) are read through Graph's batch endpoint (`POST /$batch`), which bundles up to 20 read requests into one call. The batch contains only reads.
 - With read-only access, Graph refuses to list attachments on personal accounts (observed November 2026). The archive then records which tasks have attachments but not the file names. todo-exit does not ask for write access to get around this.
 - The web app runs entirely in your browser. The only network requests it makes are to Microsoft Graph, from your browser. Your tasks are not sent to any other server.
 - The command-line tool runs on your computer and talks only to Microsoft Graph.
@@ -102,16 +102,16 @@ The full syntax:
 
 ```
 todo-exit inventory (--token <t> | --token-file <path> | --from-archive <file>) [--timezone <IANA id>]
-                    [--skip-completed-steps] [--resume <file>] [--out <dir>]
+                    [--verify-steps] [--resume <file>] [--out <dir>]
 todo-exit export    (--token <t> | --token-file <path> | --from-archive <file>) --out <dir>
                     [--formats json,markdown,todoist,csv] [--include-completed] [--timezone <IANA id>]
-                    [--skip-completed-steps] [--resume <file>]
+                    [--verify-steps] [--resume <file>]
 ```
 
 - `--from-archive` reads an `archive.json` written earlier, so you can export again later without signing in.
 - `--formats` defaults to all four. `report.md` and `report.json` are always written.
 - `--timezone` sets the zone used for due dates and reminders. It defaults to your computer's zone. Use the zone you used To Do in, otherwise due dates can shift by a day.
-- `--skip-completed-steps` does not read the steps of completed tasks. Steps need one read per task, so on an account with thousands of completed tasks this saves a lot of time. Completed tasks then have no steps in any format, and the report notes it.
+- `--verify-steps` asks Graph for the steps of every task that came without steps, to double-check that it really has none. It is slow on a large account and normally not needed. If it finds steps anywhere, the summary line and the archive say how many.
 - While reading, the tool shows progress on one line, and when it is done it prints how many lists and tasks it read, how many read errors there were, and how long it took.
 - Exit codes: 0 on success, 1 for a usage error, 2 when the export fails, 3 when the read was interrupted and a partial archive was saved.
 
@@ -123,7 +123,7 @@ A partial archive also works with `--from-archive`. The report then starts with 
 
 ### Large accounts
 
-Steps are read at roughly 15 to 20 tasks per second, because Microsoft allows 4 concurrent requests and 10,000 requests per 10 minutes per account. When Graph asks todo-exit to slow down, it waits and shows the wait on the progress line, so a pause late in a large export is expected. To shorten a large export, use `--skip-completed-steps`.
+Steps come with the tasks, so the read is mostly paging: an account with about 12,700 tasks exported in about 5 minutes. When Graph asks todo-exit to slow down, it waits and shows the wait on the progress line. Use `--verify-steps` only if you want to double-check the steps; it adds one request per task without steps.
 
 You can also install it as a .NET tool from a local build:
 
@@ -174,7 +174,7 @@ docs/                     app registration guide
 
 The archive is the source of truth. The reader saves raw Graph JSON, and every other format is generated from that file. Properties the parser does not know about stay in the archive unchanged. When something could not be read, the archive has an extra `readNotes` property listing it.
 
-Known Graph behavior: Graph accepts `$expand=checklistItems` on the tasks collection but ignores it, so todo-exit reads steps per task through `$batch`. Graph rejects `$select` on To Do tasks with 400 Bad Request when it names `title` or `status`, and ignores it otherwise, so todo-exit never uses it.
+Known Graph behavior: task pages include `checklistItems` only on tasks that have steps, and leave it out on tasks that have none; `$expand=checklistItems` changes nothing. Graph rejects `$select` on To Do tasks with 400 Bad Request when it names `title` or `status`, and ignores it otherwise, so todo-exit never uses it.
 
 ## Roadmap
 

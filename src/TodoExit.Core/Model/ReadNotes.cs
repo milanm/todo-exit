@@ -40,14 +40,24 @@ public sealed record ListReadProgress(string ListId, bool TasksComplete, int Nex
 /// What the read could not carry into the archive. Stored as the optional top-level "readNotes"
 /// property; it is omitted when there is nothing to note.
 /// </summary>
-public sealed record ReadNotes(bool StepsForCompletedTasksSkipped, IReadOnlyList<ReadError> Errors)
+/// <remarks>
+/// Older archives may contain "stepsForCompletedTasksSkipped". It is ignored here and, like any unknown property,
+/// kept when such an archive is loaded and saved again.
+/// </remarks>
+public sealed record ReadNotes(IReadOnlyList<ReadError> Errors)
 {
     public const string PropertyName = "readNotes";
 
     /// <summary>Marks a task object in the archive that was salvaged from a broken Graph response and is incomplete.</summary>
     public const string PartialMarker = "todoExitPartial";
 
-    public static ReadNotes Empty { get; } = new(false, []);
+    public static ReadNotes Empty { get; } = new([]);
+
+    /// <summary>
+    /// With --verify-steps: how many tasks without inline steps turned out to have steps. Non-zero means the
+    /// "steps come inline" assumption does not hold for this account.
+    /// </summary>
+    public int StepsFoundByVerification { get; init; }
 
     /// <summary>
     /// Graph refused to list attachments (observed with Tasks.Read on personal accounts). Attachment arrays are empty;
@@ -67,7 +77,7 @@ public sealed record ReadNotes(bool StepsForCompletedTasksSkipped, IReadOnlyList
     /// <summary>The raw list collection as Graph returned it, so a resume does not depend on list order.</summary>
     public JsonArray? PendingLists { get; init; }
 
-    public bool IsEmpty => !StepsForCompletedTasksSkipped && Errors.Count == 0 && !Interrupted && !AttachmentsDenied;
+    public bool IsEmpty => Errors.Count == 0 && !Interrupted && !AttachmentsDenied && StepsFoundByVerification == 0;
 
     /// <summary>The first list in <see cref="Progress"/> that is not complete, if any.</summary>
     public ListReadProgress? ListInProgress => Progress.FirstOrDefault(p => !p.IsComplete);
@@ -95,9 +105,13 @@ public sealed record ReadNotes(bool StepsForCompletedTasksSkipped, IReadOnlyList
 
         var result = new JsonObject
         {
-            ["stepsForCompletedTasksSkipped"] = StepsForCompletedTasksSkipped,
             ["errors"] = errors,
         };
+
+        if (StepsFoundByVerification > 0)
+        {
+            result["stepsFoundByVerification"] = StepsFoundByVerification;
+        }
 
         if (AttachmentsDenied)
         {
@@ -136,7 +150,6 @@ public sealed record ReadNotes(bool StepsForCompletedTasksSkipped, IReadOnlyList
             return Empty;
         }
 
-        var skipped = obj["stepsForCompletedTasksSkipped"] is JsonValue sv && sv.TryGetValue<bool>(out var b) && b;
         var errors = new List<ReadError>();
         if (obj["errors"] is JsonArray array)
         {
@@ -174,13 +187,15 @@ public sealed record ReadNotes(bool StepsForCompletedTasksSkipped, IReadOnlyList
         }
 
         var attachmentsDenied = obj["attachmentsDenied"] is JsonValue av && av.TryGetValue<bool>(out var a) && a;
-        if (!skipped && errors.Count == 0 && !interrupted && !attachmentsDenied)
+        var found = obj["stepsFoundByVerification"] is JsonValue fv && fv.TryGetValue<int>(out var f) ? f : 0;
+        if (errors.Count == 0 && !interrupted && !attachmentsDenied && found == 0)
         {
             return Empty;
         }
 
-        return new ReadNotes(skipped, errors)
+        return new ReadNotes(errors)
         {
+            StepsFoundByVerification = found,
             AttachmentsDenied = attachmentsDenied,
             Interrupted = interrupted,
             InterruptedReason = interrupted ? Str(obj, "interruptedReason") : null,

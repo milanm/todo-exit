@@ -67,14 +67,6 @@
         <button type="button" class="button secondary" disabled="@Busy" @onclick="LoadSampleAsync">Try with sample data</button>
     </div>
 
-    @if (Settings.SignInConfigured)
-    {
-        <label class="check">
-            <input type="checkbox" @bind="_skipCompletedSteps" disabled="@Busy" />
-            Skip steps of completed tasks (faster for large accounts)
-        </label>
-    }
-
     @if (_state == State.Reading)
     {
         <p class="status" role="status">@ProgressText</p>
@@ -165,14 +157,10 @@
                 <p class="error">This archive is incomplete. The read stopped: @_report.ReadNotes.InterruptedReason</p>
             }
 
-            @if (_report.ReadNotes.StepsForCompletedTasksSkipped || _report.ReadNotes.Errors.Count > 0)
+            @if (_report.ReadNotes.Errors.Count > 0)
             {
                 <h3>Could not be read from Microsoft Graph</h3>
                 <p>This applies to every format, the JSON archive included.</p>
-                @if (_report.ReadNotes.StepsForCompletedTasksSkipped)
-                {
-                    <p>Steps of completed tasks were not read, by choice.</p>
-                }
                 @if (_report.ReadNotes.Errors.Count > 0)
                 {
                     <table class="table counts">
@@ -186,7 +174,7 @@
                     <details>
                         <summary>Show each item</summary>
                         <ul class="loss-list">
-                            @foreach (var e in _report.ReadNotes.Errors)
+                            @foreach (var e in _report.ReadNotes.Errors.Take(LossReport.MaxItemsPerSection))
                             {
                                 <li><span class="loss-where">@e.ListName@(e.TaskTitle is not null ? $" / {e.TaskTitle}" : e.Position is { } pos ? $" / task at position {pos}" : "")</span> @e.Message</li>
                             }
@@ -207,21 +195,29 @@
                 <h3>@FormatTitle(group.Key)</h3>
                 <table class="table counts">
                     <tbody>
-                        @foreach (var kind in group.GroupBy(l => l.Kind).OrderByDescending(k => k.Count()))
+                        @foreach (var kind in group.GroupBy(l => l.Kind).OrderByDescending(k => k.Sum(l => l.Count)))
                         {
-                            <tr><th scope="row">@KindText(kind.Key)</th><td>@kind.Count()</td></tr>
+                            <tr><th scope="row">@KindText(kind.Key)</th><td>@kind.Sum(l => l.Count).ToString("N0")</td></tr>
                         }
                     </tbody>
                 </table>
-                <details>
-                    <summary>Show each item</summary>
-                    <ul class="loss-list">
-                        @foreach (var loss in group)
+                var perTask = group.Where(l => !l.Aggregated).ToList();
+                @if (perTask.Count > 0)
+                {
+                    <details>
+                        <summary>Show the tasks to check (@perTask.Count)</summary>
+                        <ul class="loss-list">
+                            @foreach (var loss in perTask.Take(LossReport.MaxItemsPerSection))
+                            {
+                                <li><span class="loss-where">@loss.List@(loss.Task is null ? "" : $" / {loss.Task}")</span> @loss.Message</li>
+                            }
+                        </ul>
+                        @if (perTask.Count > LossReport.MaxItemsPerSection)
                         {
-                            <li><span class="loss-where">@loss.List@(loss.Task is null ? "" : $" / {loss.Task}")</span> @loss.Message</li>
+                            <p>... and @(perTask.Count - LossReport.MaxItemsPerSection) more, listed in report.json in the zip file.</p>
                         }
-                    </ul>
-                </details>
+                    </details>
+                }
             }
 
             @if (!_report.Losses.Any() && SelectedFormats != ExportFormats.Json)
@@ -253,7 +249,6 @@
     private bool _todoist = true;
     private bool _csv = true;
     private bool _includeCompleted;
-    private bool _skipCompletedSteps;
 
     private bool Busy => _state == State.Reading;
 
@@ -302,7 +297,7 @@
         try
         {
             var http = HttpFactory.CreateClient(AppSettings.GraphClientName);
-            var reader = new GraphTodoReader(http) { IncludeStepsForCompletedTasks = !_skipCompletedSteps };
+            var reader = new GraphTodoReader(http);
             var progress = new Progress<ReadProgress>(p =>
             {
                 _progress = p;

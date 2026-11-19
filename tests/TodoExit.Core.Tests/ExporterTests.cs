@@ -377,7 +377,7 @@ public class LossReportTests
         Assert.Equal(0, (int)inventory["unreadable"]!);
         Assert.Equal(0, (int)inventory["partial"]!);
         Assert.Empty(json["readErrors"]!.AsArray());
-        Assert.False((bool)json["stepsForCompletedTasksSkipped"]!);
+        Assert.False(json.ContainsKey("stepsForCompletedTasksSkipped"));
 
         var losses = json["losses"]!.AsArray().Select(n => n!.AsObject()).ToList();
         var kinds = losses.Select(l => ((string)l["format"]!, (string)l["kind"]!)).ToHashSet();
@@ -398,8 +398,7 @@ public class LossReportTests
     [Fact]
     public void Read_errors_are_reported_for_every_format_including_the_archive()
     {
-        var notes = new Model.ReadNotes(true,
-        [
+        var notes = new Model.ReadNotes([
             new Model.ReadError("task-unreadable", "list-Shared", "Shared", null, null, 9269, "broken"),
             new Model.ReadError("task-partial", "list-Shared", "Shared", "T9", "Half task", 12, "partial read"),
             new Model.ReadError("steps-unreadable", "list-Shared", "Shared", "T1", "Open", null, "404"),
@@ -415,7 +414,6 @@ public class LossReportTests
         var result = ExportService.Export(doc, archive, new ExportOptions(ExportFormats.Json));
 
         var json = JsonNode.Parse(result.Files.Single(f => f.Path == "report.json").GetText())!.AsObject();
-        Assert.True((bool)json["stepsForCompletedTasksSkipped"]!);
         var errors = json["readErrors"]!.AsArray().Select(n => n!.AsObject()).ToList();
         Assert.Equal(["task-unreadable", "task-partial", "steps-unreadable"], errors.Select(e => (string)e["kind"]!));
         Assert.Equal(9269, (int)errors[0]["position"]!);
@@ -429,7 +427,6 @@ public class LossReportTests
         Assert.Contains("## Could not be read from Microsoft Graph", md);
         Assert.Contains("| task-unreadable | 1 |", md);
         Assert.Contains("Task at position 9269", md);
-        Assert.Contains("Steps of completed tasks were not read, by choice", md);
         Assert.DoesNotContain("It has no losses.", md);
         Assert.Contains("| Unreadable (skipped) | 1 |", md);
         Assert.Contains("| Partial | 1 |", md);

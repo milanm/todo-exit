@@ -172,11 +172,22 @@ public sealed class GraphTodoReader
         _clock = clock ?? (() => DateTimeOffset.UtcNow);
     }
 
-    /// <summary>When false, completed tasks get an empty step list without any request. Default true.</summary>
-    public bool IncludeStepsForCompletedTasks { get; init; } = true;
+    /// <summary>
+    /// Steps come inline with the task pages: Graph includes "checklistItems" on every task that has steps and omits
+    /// it on tasks that have none, so by default no step requests are sent. When true, tasks without inline steps are
+    /// checked through /checklistItems (in batches); anything found is merged and counted in
+    /// <see cref="ReadNotes.StepsFoundByVerification"/>.
+    /// </summary>
+    public bool VerifySteps { get; init; }
 
-    /// <summary>How steps were read in the last run: "batch", "individual" (batching unavailable) or "none".</summary>
-    public string StepReadMode { get; private set; } = "none";
+    /// <summary>
+    /// How steps were read in the last run: "inline" (from the task pages only), or with <see cref="VerifySteps"/>
+    /// "batch" or "individual" (batching unavailable) for the verification requests.
+    /// </summary>
+    public string StepReadMode { get; private set; } = "inline";
+
+    /// <summary>With <see cref="VerifySteps"/>: tasks without inline steps that turned out to have steps, in the last run.</summary>
+    public int StepsFoundByVerification { get; private set; }
 
     /// <summary>
     /// Reads everything. When <paramref name="resumeFrom"/> is a partial archive from an earlier interrupted read,
@@ -193,7 +204,8 @@ public sealed class GraphTodoReader
         _batchUnavailable = false;
         _attachmentsDenied = false;
         _attachmentsSucceeded = false;
-        StepReadMode = "none";
+        StepReadMode = "inline";
+        StepsFoundByVerification = 0;
         _progress = progress;
         progress = progress is null ? null : new ProgressRelay(this);
         BatchSizesSent.Clear();
@@ -322,8 +334,9 @@ public sealed class GraphTodoReader
         }
 
         var interrupted = interruptedReason is not null;
-        var notes = new ReadNotes(run.StepsSkippedBefore || !IncludeStepsForCompletedTasks, errors)
+        var notes = new ReadNotes(errors)
         {
+            StepsFoundByVerification = run.StepsFoundBefore + StepsFoundByVerification,
             AttachmentsDenied = denied,
             Interrupted = interrupted,
             InterruptedReason = interruptedReason,
@@ -362,7 +375,7 @@ public sealed class GraphTodoReader
 
         public List<ReadError> InitialErrors { get; private init; } = new();
 
-        public bool StepsSkippedBefore { get; private init; }
+        public int StepsFoundBefore { get; private init; }
 
         public JsonArray? PendingListsBefore { get; private init; }
 
@@ -395,7 +408,7 @@ public sealed class GraphTodoReader
             var run = new RunState
             {
                 InitialErrors = notes.Errors.ToList(),
-                StepsSkippedBefore = notes.StepsForCompletedTasksSkipped,
+                StepsFoundBefore = notes.StepsFoundByVerification,
                 PendingListsBefore = notes.PendingLists,
                 AttachmentsDeniedBefore = notes.AttachmentsDenied,
             };
@@ -622,13 +635,19 @@ public sealed class GraphTodoReader
                 continue; // already read (earlier run), or Graph may start honoring $expand one day
             }
 
-            if (GetString(task, "id") is null || (!IncludeStepsForCompletedTasks && IsCompleted(task)))
+            // No inline array means the task has no steps (measured on a live account).
+            if (!VerifySteps || GetString(task, "id") is null)
             {
                 task["checklistItems"] = new JsonArray();
                 continue;
             }
 
             pending.Add(task);
+        }
+
+        if (pending.Count == 0)
+        {
+            return;
         }
 
         await ReadSubCollectionAsync(list, StepsCollection, pending, tasksRead, progress, cancellationToken).ConfigureAwait(false);
@@ -745,7 +764,7 @@ public sealed class GraphTodoReader
             return;
         }
 
-        if (isSteps && (StepReadMode == "none" || _batchUnavailable))
+        if (isSteps && (StepReadMode == "inline" || _batchUnavailable))
         {
             StepReadMode = "individual";
         }
@@ -785,9 +804,17 @@ public sealed class GraphTodoReader
         }
     }
 
-    /// <summary>Stores a collection on a task. Attachment content is never requested; drop it defensively if present.</summary>
-    private static void Store(JsonObject task, SubCollection kind, JsonArray items)
+    /// <summary>
+    /// Stores a collection on a task. Attachment content is never requested; drop it defensively if present.
+    /// Steps stored here come from verification (tasks without inline steps), so any non-empty result is counted.
+    /// </summary>
+    private void Store(JsonObject task, SubCollection kind, JsonArray items)
     {
+        if (kind == StepsCollection && items.Count > 0)
+        {
+            StepsFoundByVerification++;
+        }
+
         foreach (var item in items.OfType<JsonObject>())
         {
             item.Remove("contentBytes");
@@ -1414,9 +1441,6 @@ public sealed class GraphTodoReader
 
     private void AddKindError(ListContext list, SubCollection kind, JsonObject task, string message) =>
         AddError(new ReadError(kind.ErrorKind, list.Id, list.Name, GetString(task, "id"), GetString(task, "title"), null, message));
-
-    private static bool IsCompleted(JsonObject task) =>
-        string.Equals(GetString(task, "status"), "completed", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Path without query string, for error messages.</summary>
     private static string DescribeUrl(string url)

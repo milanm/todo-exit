@@ -41,7 +41,7 @@ public static class ExportService
             files.Add(GenericCsvExporter.Export(archive, losses));
         }
 
-        var ordered = losses
+        var ordered = LossCatalog.Aggregate(losses)
             .Select((loss, index) => (loss, index))
             .OrderBy(x => FormatRank(x.loss.Format))
             .ThenBy(x => x.index)

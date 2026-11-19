@@ -22,10 +22,10 @@ public static class Program
 
         Usage:
           todo-exit inventory (--token <t> | --token-file <path> | --from-archive <file>) [--timezone <IANA id>]
-                              [--skip-completed-steps] [--resume <file>] [--out <dir>]
+                              [--verify-steps] [--resume <file>] [--out <dir>]
           todo-exit export    (--token <t> | --token-file <path> | --from-archive <file>) --out <dir>
                               [--formats json,markdown,todoist,csv] [--include-completed] [--timezone <IANA id>]
-                              [--skip-completed-steps] [--resume <file>]
+                              [--verify-steps] [--resume <file>]
 
         Options:
           --token <t>           Microsoft Graph access token with Tasks.Read. Can also come from TODOEXIT_TOKEN.
@@ -35,7 +35,8 @@ public static class Program
           --out <dir>           Output directory. For inventory, only used to save a partial archive.
           --formats <list>      Comma-separated: json, markdown, todoist, csv. Default: all four.
           --include-completed   Write completed tasks and checked steps to the Todoist CSV as open tasks.
-          --skip-completed-steps Do not read steps of completed tasks (faster for large accounts).
+          --verify-steps        Also ask Graph for the steps of every task that came without inline steps,
+                                to double-check. Slower; normally not needed.
           --timezone <id>       Time zone for dates, e.g. Europe/Belgrade. Default: this computer's zone.
           -h, --help            Show this help.
 
@@ -77,6 +78,11 @@ public static class Program
         {
             await stdout.WriteLineAsync(Usage);
             return ExitOk;
+        }
+
+        foreach (var notice in options.Notices)
+        {
+            await stderr.WriteLineAsync(notice);
         }
 
         try
@@ -127,10 +133,10 @@ public static class Program
                 await stdout.WriteLineAsync("  " + file.Path);
             }
 
-            var losses = result.Report.Losses;
-            await stdout.WriteLineAsync(losses.Count == 0
-                ? "Nothing was lost in the selected formats."
-                : $"{losses.Count} items could not be carried over in full. See report.md.");
+            foreach (var line in result.Report.SummaryLines())
+            {
+                await stdout.WriteLineAsync(line);
+            }
             await WriteResumeDoneAsync(options, stdout);
             return ExitOk;
         }
@@ -176,7 +182,7 @@ public static class Program
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
         http.DefaultRequestHeaders.UserAgent.ParseAdd("todo-exit/0.1");
 
-        var reader = new GraphTodoReader(http, delay) { IncludeStepsForCompletedTasks = !options.SkipCompletedSteps };
+        var reader = new GraphTodoReader(http, delay) { VerifySteps = options.VerifySteps };
         var progress = new SyncProgress<ReadProgress>(p => stderr.Write("\r" + FormatProgress(p).PadRight(90)));
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -190,7 +196,12 @@ public static class Program
         await stderr.WriteLineAsync();
         await stderr.WriteLineAsync(
             $"Read {lists} lists and {tasks} tasks in {stopwatch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s. " +
-            (errors == 0 ? "No read errors." : $"{errors} read errors, listed in report.md."));
+            (errors == 0 ? "No read errors." : $"{errors} read errors, listed in report.md.") +
+            (options.VerifySteps
+                ? reader.StepsFoundByVerification == 0
+                    ? " Step check: every task without inline steps really has none."
+                    : $" Step check: found steps on {reader.StepsFoundByVerification} tasks that had none inline."
+                : string.Empty));
 
         return document;
     }
@@ -294,7 +305,10 @@ internal sealed class Options
 
     public bool IncludeCompleted { get; private set; }
 
-    public bool SkipCompletedSteps { get; private set; }
+    public bool VerifySteps { get; private set; }
+
+    /// <summary>Lines to print on stderr before running, e.g. for options that are no longer needed.</summary>
+    public List<string> Notices { get; } = new();
 
     public string? ResumePath { get; private set; }
 
@@ -365,6 +379,14 @@ internal sealed class Options
                 case "--timezone":
                     timezone = Value();
                     break;
+                case "--verify-steps":
+                    if (inline is not null)
+                    {
+                        throw new UsageException("--verify-steps does not take a value");
+                    }
+
+                    o.VerifySteps = true;
+                    break;
                 case "--resume":
                     o.ResumePath = Value();
                     break;
@@ -380,7 +402,7 @@ internal sealed class Options
                         throw new UsageException("--skip-completed-steps does not take a value");
                     }
 
-                    o.SkipCompletedSteps = true;
+                    o.Notices.Add("Note: --skip-completed-steps is no longer needed. Steps now come with the tasks, so it is ignored.");
                     break;
                 case "--include-completed" when o.Command == "export":
                     if (inline is not null)

@@ -146,7 +146,7 @@ public static partial class TodoistCsvExporter
 
         if (task.HasAnyAttachment)
         {
-            losses.Add(MarkdownExporter.AttachmentLoss(ExportFormatNames.Todoist, list, task));
+            losses.Add(MarkdownExporter.AttachmentLoss(ExportFormatNames.Todoist, list, task) with { TaskIsOpen = !task.IsCompleted });
         }
 
         var priority = task.Importance == Importance.High ? 1 : 4;
@@ -213,5 +213,5 @@ public static partial class TodoistCsvExporter
     }
 
     private static Loss Loss(TaskList list, TodoItem task, string kind, string message) =>
-        new(ExportFormatNames.Todoist, list.Name, task.Title, kind, message);
+        new(ExportFormatNames.Todoist, list.Name, task.Title, kind, message) { TaskIsOpen = !task.IsCompleted };
 }

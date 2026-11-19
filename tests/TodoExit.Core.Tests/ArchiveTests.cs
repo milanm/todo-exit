@@ -73,8 +73,7 @@ public class ArchiveTests
     [Fact]
     public void Read_notes_round_trip()
     {
-        var notes = new ReadNotes(true,
-        [
+        var notes = new ReadNotes([
             new ReadError(ReadErrorKinds.TaskUnreadable, "L1", "Tasks", null, null, 9269, "broken"),
             new ReadError(ReadErrorKinds.AttachmentsUnreadable, "L1", "Tasks", "T1", "Title", null, "500"),
         ]);
@@ -82,7 +81,6 @@ public class ArchiveTests
         var text = doc.ToJsonString();
         var reread = TodoArchiveDocument.Parse(text);
 
-        Assert.Equal(notes.StepsForCompletedTasksSkipped, reread.ReadNotes.StepsForCompletedTasksSkipped);
         Assert.Equal(notes.Errors, reread.ReadNotes.Errors);
         Assert.Equal(text, reread.ToJsonString());
 
@@ -98,7 +96,7 @@ public class ArchiveTests
     [Fact]
     public void Read_notes_are_omitted_when_empty_and_absent_archives_parse()
     {
-        var doc = TodoArchiveDocument.Create(DateTimeOffset.UnixEpoch, [new ArchivedList(TestData.List("Tasks"), [])], new ReadNotes(false, []));
+        var doc = TodoArchiveDocument.Create(DateTimeOffset.UnixEpoch, [new ArchivedList(TestData.List("Tasks"), [])], new ReadNotes([]));
         Assert.False(doc.Root.ContainsKey("readNotes"));
         Assert.DoesNotContain("readNotes", doc.ToJsonString());
 

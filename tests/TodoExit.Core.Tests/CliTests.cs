@@ -32,7 +32,7 @@ public class CliTests
     {
         var graph = Account();
         var posts = 0;
-        graph.Intercept = (r, _) => r.Method == "POST" && ++posts == 2
+        graph.Intercept = (r, _) => r.Method == "POST" && ++posts == 1
             ? FakeGraph.Json("""{ "error": { "code": "InvalidAuthenticationToken", "message": "expired" } }""", HttpStatusCode.Unauthorized)
             : null;
 
@@ -79,6 +79,34 @@ public class CliTests
         Assert.Equal(Program.ExitOk, code);
         Assert.Contains("incomplete", err);
         Assert.StartsWith("# todo-exit report\n\n**This archive is incomplete.**", await File.ReadAllTextAsync(Path.Combine(outDir, "report.md")));
+    }
+
+    [Fact]
+    public async Task Old_skip_completed_steps_flag_is_accepted_as_a_no_op_and_summary_lines_are_printed()
+    {
+        var graph = Account();
+        graph.AddList("L2", "Done list", 3, i => new JsonObject { ["id"] = $"d{i}", ["title"] = $"Done {i}", ["status"] = "completed" });
+        var outDir = NewDir();
+
+        var (code, stdout, err) = await Run(graph, "export", "--token", "x", "--out", outDir, "--skip-completed-steps");
+
+        Assert.Equal(Program.ExitOk, code);
+        Assert.Contains("--skip-completed-steps is no longer needed", err);
+        Assert.Contains("Todoist CSV: 3 completed tasks left out by design, 1 attachment to re-add by hand.", stdout);
+        Assert.DoesNotContain("could not be carried over", stdout);
+        Assert.DoesNotContain(graph.Requests, r => r.Url.Contains("checklistItems")
+            || (r.Body?.ToJsonString().Contains("checklistItems") ?? false));
+    }
+
+    [Fact]
+    public async Task Verify_steps_flag_reports_the_step_check()
+    {
+        var graph = Account();
+        var (code, _, err) = await Run(graph, "inventory", "--token", "x", "--verify-steps");
+
+        Assert.Equal(Program.ExitOk, code);
+        Assert.Contains("Step check: every task without inline steps really has none.", err);
+        Assert.Contains(graph.Posts, p => p.Body!.ToJsonString().Contains("checklistItems"));
     }
 
     [Fact]
