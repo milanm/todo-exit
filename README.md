@@ -83,7 +83,7 @@ Todoist cannot undo an import, so try one small list first. A Todoist project ho
 
 Tested on one personal Microsoft account with 14 lists and about 12,700 tasks. The command-line tool on Windows and the hosted web app produced the same files. Three Todoist CSV files were imported into Todoist and read back, and they matched.
 
-The transfer through the Todoist API was tested with the command-line tool on a free Todoist account, including an interrupted transfer that was continued. Each task and sub-task arrived once.
+The transfer through the Todoist API was tested on a free Todoist account, with the command-line tool and from the hosted web app, including an interrupted transfer that was continued. Each task and sub-task arrived once.
 
 Not tested yet: work and school Microsoft accounts, and Todoist reminders on a paid plan.
 
