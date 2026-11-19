@@ -27,6 +27,8 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
         using (var w = new Utf8JsonWriter(stream, new JsonWriterOptions
         {
             Indented = true,
+            // LF on every OS, like the other exported files.
+            NewLine = "\n",
             Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         }))
         {

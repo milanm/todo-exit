@@ -140,6 +140,8 @@ public sealed class TodoArchiveDocument
         using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions
         {
             Indented = indented,
+            // LF on every OS, like the other exported files.
+            NewLine = "\n",
             Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         }))
         {
