@@ -50,7 +50,25 @@ public static class ExportService
 
         var report = new LossReport(Inventory.From(archive), ordered, options.Formats) { ReadNotes = archive.ReadNotes };
         files.AddRange(report.ToFiles());
+        EnsureDistinctPaths(files);
         return new ExportResult(files, report);
+    }
+
+    /// <summary>
+    /// The last check before anything is written or zipped: two files whose paths differ only in case or Unicode
+    /// normalization would overwrite each other on Windows and macOS, so the export fails instead.
+    /// </summary>
+    /// <exception cref="ExportPathConflictException">Two files would be the same file.</exception>
+    public static void EnsureDistinctPaths(IEnumerable<ExportFile> files)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+        var groups = FileNames.SameFileGroups(files.Select(f => f.Path));
+        if (groups.Count > 0)
+        {
+            throw new ExportPathConflictException(
+                "The export stopped before writing anything: these files would overwrite each other: " +
+                string.Join("; ", groups.Select(g => string.Join(" and ", g))) + ". Please report this as a bug.");
+        }
     }
 
     private static int FormatRank(string format) => format switch
@@ -61,3 +79,6 @@ public static class ExportService
         _ => 3,
     };
 }
+
+/// <summary>Two files of one export would have the same path on Windows or macOS. Nothing was written.</summary>
+public sealed class ExportPathConflictException(string message) : InvalidOperationException(message);

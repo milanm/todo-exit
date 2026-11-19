@@ -136,9 +136,12 @@ public static class Program
                 Directory.CreateDirectory(outDir);
                 var partialPath = Path.Combine(outDir, PartialArchiveFileName);
                 await File.WriteAllBytesAsync(partialPath, ex.PartialArchive.ToUtf8Bytes(), CancellationToken.None);
-                await stderr.WriteLineAsync(options.SignIn
-                    ? $"Saved what was read to {partialPath}. Run the same command with --resume \"{partialPath}\"; it will ask you to sign in again."
-                    : $"Saved what was read to {partialPath}. Get a new token and run the same command with --resume \"{partialPath}\".");
+                var outage = ex.InnerException is GraphRequestException { IsOutage: true };
+                await stderr.WriteLineAsync(outage
+                    ? $"Saved what was read to {partialPath}. When Microsoft Graph is available again, run the same command with --resume \"{partialPath}\"."
+                    : options.SignIn
+                        ? $"Saved what was read to {partialPath}. Run the same command with --resume \"{partialPath}\"; it will ask you to sign in again."
+                        : $"Saved what was read to {partialPath}. Get a new token and run the same command with --resume \"{partialPath}\".");
                 return ExitInterrupted;
             }
 
@@ -183,7 +186,7 @@ public static class Program
             return ExitFailure;
         }
         catch (Exception ex) when (ex is GraphRequestException or InvalidDataException or IOException
-                                       or UnauthorizedAccessException or HttpRequestException)
+                                       or UnauthorizedAccessException or HttpRequestException or ExportPathConflictException)
         {
             await stderr.WriteLineAsync($"error: {ex.Message}");
             return ExitFailure;

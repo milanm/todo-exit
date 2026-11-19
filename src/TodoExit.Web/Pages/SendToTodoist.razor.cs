@@ -1,9 +1,6 @@
 using Microsoft.AspNetCore.Components;
 using Microsoft.JSInterop;
-using TodoExit.Core.Archive;
-using TodoExit.Core.Model;
 using TodoExit.Core.Todoist;
-using TodoExit.Web.Services;
 
 namespace TodoExit.Web.Pages;
 
@@ -14,73 +11,85 @@ namespace TodoExit.Web.Pages;
 /// </summary>
 public sealed partial class SendToTodoist : IDisposable
 {
-    private TodoistTransferSession? _session;
-    private TodoArchive? _shownArchive;
+    private TodoistTransferSession? _shownSession;
     private IReadOnlyList<string> _lists = [];
     private readonly HashSet<string> _chosen = new(StringComparer.Ordinal);
     private bool _includeCompleted;
     private bool _confirmed;
+    private bool _confirmDiscard;
     private string _token = string.Empty;
     private string? _status;
     private string? _error;
-    private bool _planning;
-    private bool _running;
     private CancellationTokenSource? _cts;
-
-    [Inject]
-    private IHttpClientFactory HttpFactory { get; set; } = default!;
 
     [Inject]
     private IJSRuntime JS { get; set; } = default!;
 
+    /// <summary>The archive and its transfer session, shared with the page, which decides what may start.</summary>
     [Parameter, EditorRequired]
-    public TodoArchiveDocument Document { get; set; } = default!;
-
-    [Parameter, EditorRequired]
-    public TodoArchive Archive { get; set; } = default!;
+    public ArchiveWorkspace Workspace { get; set; } = default!;
 
     [Parameter]
     public bool IsSample { get; set; }
 
-    /// <summary>True while the account is read or a transfer runs, so the page does not swap the archive.</summary>
+    /// <summary>Raised when planning or a transfer starts or stops, so the page updates what it allows.</summary>
     [Parameter]
-    public EventCallback<bool> BusyChanged { get; set; }
+    public EventCallback ActivityChanged { get; set; }
 
-    private bool Running => _running;
+    private TodoistTransferSession? Session => Workspace.Session;
+
+    private bool Running => Session?.IsRunning == true;
+
+    private bool Planning => Session?.IsPlanning == true;
+
+    /// <summary>Why step 5 cannot plan or transfer now (Microsoft Graph is being read), or null.</summary>
+    private string? Blocked => Workspace.TodoistLockReason;
 
     /// <summary>An unfinished transfer fixes the choices: its state belongs to this plan.</summary>
-    private bool ChoicesLocked => _running || _planning || _session?.State is { Finished: false };
+    private bool ChoicesLocked => Running || Planning || Blocked is not null || Session?.HasUnfinishedTransfer == true;
 
     private bool CanShowPlan => !ChoicesLocked && _token.Trim().Length > 0 && _chosen.Count > 0;
 
-    private bool CanTransfer => !_running && !_planning && _confirmed && _token.Trim().Length > 0
-        && _session is { Plan.CanStart: true, State: null };
+    private bool CanTransfer => !Running && !Planning && Blocked is null && _confirmed && _token.Trim().Length > 0
+        && Session is { Plan.CanStart: true, State: null };
 
-    protected override void OnParametersSet()
+    private bool CanContinue => Session is { CanContinue: true } && !Running && Blocked is null && _token.Trim().Length > 0;
+
+    protected override void OnParametersSet() => SyncSession();
+
+    /// <summary>A new session (new archive, or a discarded transfer) starts with fresh choices.</summary>
+    private void SyncSession()
     {
-        if (ReferenceEquals(Archive, _shownArchive))
+        if (ReferenceEquals(Session, _shownSession))
         {
             return;
         }
 
-        _shownArchive = Archive;
-        _session = new TodoistTransferSession(Document, Archive, () => HttpFactory.CreateClient(AppSettings.TodoistClientName));
+        _shownSession = Session;
         _includeCompleted = false;
-        _lists = TodoistTransferSession.ListsWithTasks(Archive, _includeCompleted);
+        _lists = Session is null ? [] : TodoistTransferSession.ListsWithTasks(Session.Archive, _includeCompleted);
         _chosen.Clear();
         _chosen.UnionWith(_lists);
         _confirmed = false;
+        _confirmDiscard = false;
         _status = null;
         _error = null;
     }
 
-    /// <summary>A plan that was shown but not used is dropped when what it was built from changes.</summary>
+    /// <summary>
+    /// A plan that was shown but not used is dropped when what it was built from changes. A plan still being read is
+    /// dropped too, so its answer cannot show up later for other choices or another token.
+    /// </summary>
     private void ResetPlan(string why = "The choices changed")
     {
-        if (_session?.Plan is not null && _session.State is null)
+        if (Session is { State: null } session)
         {
-            _session = new TodoistTransferSession(Document, Archive, () => HttpFactory.CreateClient(AppSettings.TodoistClientName));
-            _status = why + ", so the plan was cleared. Choose Show plan to see it again before transferring.";
+            if (session.Plan is not null || session.IsPlanning)
+            {
+                _status = why + ", so the plan was cleared. Choose Show plan to see it again before transferring.";
+            }
+
+            session.ClearPlan();
         }
 
         _confirmed = false;
@@ -89,10 +98,7 @@ public sealed partial class SendToTodoist : IDisposable
     private void TokenChanged()
     {
         _error = null;
-        if (_session?.State is null)
-        {
-            ResetPlan("The token changed"); // a plan read with another token may be for another account
-        }
+        ResetPlan("The token changed"); // a plan read with another token may be for another account
     }
 
     private void ForgetToken()
@@ -120,8 +126,13 @@ public sealed partial class SendToTodoist : IDisposable
 
     private void IncludeCompletedChanged()
     {
+        if (Session is null)
+        {
+            return;
+        }
+
         var before = _lists;
-        _lists = TodoistTransferSession.ListsWithTasks(Archive, _includeCompleted);
+        _lists = TodoistTransferSession.ListsWithTasks(Session.Archive, _includeCompleted);
 
         // Lists that appear are chosen like the others were by default; lists that disappear are dropped.
         _chosen.UnionWith(_lists.Except(before, StringComparer.Ordinal));
@@ -131,78 +142,109 @@ public sealed partial class SendToTodoist : IDisposable
 
     private async Task ShowPlanAsync()
     {
-        if (!CanShowPlan || _session is null)
+        var session = Session;
+        if (!CanShowPlan || session is null)
         {
             return;
         }
 
         _error = null;
         _status = "Reading your Todoist account. Nothing is written.";
-        _planning = true;
         _confirmed = false;
-        await BusyChanged.InvokeAsync(true);
         try
         {
             // Every offered list chosen: no filter, like the command-line tool without --lists.
             var lists = _chosen.Count == _lists.Count ? null : _lists.Where(_chosen.Contains).ToList();
-            var plan = await _session.PlanAsync(new TodoistToken(_token), lists, _includeCompleted, (wait, reason) =>
+            var planning = session.PlanAsync(new TodoistToken(_token), lists, _includeCompleted, (wait, reason) =>
             {
-                _status = $"Todoist did not answer ({reason}). Trying again in {Math.Ceiling(wait.TotalSeconds)} seconds.";
-                StateHasChanged();
+                if (ReferenceEquals(session, Session))
+                {
+                    _status = $"Todoist did not answer ({reason}). Trying again in {Math.Ceiling(wait.TotalSeconds)} seconds.";
+                    StateHasChanged();
+                }
             }, CancellationToken.None);
+            await ActivityChanged.InvokeAsync(); // the page now knows the account is being read
+            var plan = await planning;
+            if (!ReferenceEquals(session, Session))
+            {
+                return; // the archive was replaced or the transfer discarded meanwhile: this answer belongs to nothing shown
+            }
+
+            if (plan is null)
+            {
+                _status = "The token or the choices changed while your Todoist account was read, so that plan was dropped. Choose Show plan again.";
+                return;
+            }
+
             _status = plan.CanStart
                 ? "The plan is ready. Nothing has been written to Todoist."
                 : "The plan has problems. Nothing has been written to Todoist.";
         }
         catch (TodoistApiException ex)
         {
-            _status = null;
-            _error = ex.Failure == TodoistFailure.TokenRejected
-                ? "Todoist did not accept this token. Copy it again from Todoist: Settings, Integrations, Developer. Nothing was written."
-                : ex.Message + " Nothing was written.";
+            if (ReferenceEquals(session, Session))
+            {
+                _status = null;
+                _error = ex.Failure == TodoistFailure.TokenRejected
+                    ? "Todoist did not accept this token. Copy it again from Todoist: Settings, Integrations, Developer. Nothing was written."
+                    : ex.Message + " Nothing was written.";
+            }
         }
         catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or ArgumentException or OperationCanceledException)
         {
-            _status = null;
-            _error = "Todoist could not be reached. Nothing was written. Check the connection and try again.";
+            if (ReferenceEquals(session, Session))
+            {
+                _status = null;
+                _error = ex is InvalidOperationException && Blocked is { } why
+                    ? why
+                    : "Todoist could not be reached. Nothing was written. Check the connection and try again.";
+            }
         }
         finally
         {
-            _planning = false;
-            await BusyChanged.InvokeAsync(false);
+            await ActivityChanged.InvokeAsync();
         }
     }
 
     private async Task TransferAsync()
     {
-        if (_session is null || _token.Trim().Length == 0 || _running)
+        var session = Session;
+        if (session is null || _token.Trim().Length == 0 || session.IsBusy || Blocked is not null)
         {
             return;
         }
 
-        if (_session.State is null && !CanTransfer)
+        if (session.State is null && !CanTransfer)
         {
             return;
         }
 
         _error = null;
-        _running = true;
+        _confirmDiscard = false;
         _status = "Starting the transfer...";
         _cts?.Dispose();
-        _cts = new CancellationTokenSource();
-        await BusyChanged.InvokeAsync(true);
+        var cts = _cts = new CancellationTokenSource();
         try
         {
-            var result = await _session.RunAsync(new TodoistToken(_token), new ProgressCallback(p =>
+            var running = session.RunAsync(new TodoistToken(_token), new ProgressCallback(p =>
             {
-                _status = ProgressText(p);
-                StateHasChanged();
-            }), _cts.Token);
+                if (ReferenceEquals(session, Session))
+                {
+                    _status = ProgressText(p);
+                    StateHasChanged();
+                }
+            }), cts.Token);
+            await ActivityChanged.InvokeAsync(); // the page now knows a transfer is running
+            var result = await running;
+            if (!ReferenceEquals(session, Session))
+            {
+                return;
+            }
 
             switch (result.Status)
             {
                 case TransferStatus.Completed:
-                    var c = _session.Counts();
+                    var c = session.Counts();
                     _status = c.Errors + c.Skipped == 0
                         ? "The transfer finished. The token was removed from this page."
                         : "The transfer finished. Todoist did not accept some items; they are listed below. The token was removed from this page.";
@@ -213,6 +255,12 @@ public sealed partial class SendToTodoist : IDisposable
                     _error = (result.Message == "Cancelled." ? "The transfer was cancelled." : "The transfer stopped: " + result.Message)
                         + " What was sent is recorded in this page. Choose Continue to finish it.";
                     break;
+                case TransferStatus.WrongAccount:
+                    _status = null;
+                    _error = result.Message + (session.State is null
+                        ? " To transfer to the account of this token instead, choose Show plan again."
+                        : " Enter the token of that account, then choose Continue.");
+                    break;
                 default:
                     _status = null;
                     _error = "The transfer stopped: " + result.Message + " Fix the problem, then choose Continue.";
@@ -221,15 +269,35 @@ public sealed partial class SendToTodoist : IDisposable
         }
         catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or ArgumentException)
         {
-            _status = null;
-            _error = "The transfer stopped because of an unexpected error. What was sent is recorded in this page; choose Continue to try again.";
+            if (ReferenceEquals(session, Session))
+            {
+                _status = null;
+                _error = "The transfer stopped because of an unexpected error. What was sent is recorded in this page; choose Continue to try again.";
+            }
         }
         finally
         {
-            _running = false;
             _confirmed = false;
-            await BusyChanged.InvokeAsync(false);
+            await ActivityChanged.InvokeAsync();
         }
+    }
+
+    /// <summary>"Discard this transfer" asks first: what is lost, and that the state can be downloaded before.</summary>
+    private void AskDiscard() => _confirmDiscard = true;
+
+    private void KeepTransfer() => _confirmDiscard = false;
+
+    private async Task DiscardAsync()
+    {
+        if (Session is not { IsRunning: false })
+        {
+            return;
+        }
+
+        Workspace.DiscardTransfer();
+        SyncSession();
+        _status = "The transfer was discarded. What it already created in Todoist is still there. You can read your tasks again or plan a new transfer.";
+        await ActivityChanged.InvokeAsync();
     }
 
     private void Cancel()
@@ -240,7 +308,7 @@ public sealed partial class SendToTodoist : IDisposable
 
     private async Task DownloadStateAsync()
     {
-        if (_session?.StateFile() is { } bytes)
+        if (Session?.StateFile() is { } bytes)
         {
             await JS.InvokeVoidAsync("todoExit.download", "todoist-transfer-state.json", "application/json", bytes);
         }
@@ -252,7 +320,7 @@ public sealed partial class SendToTodoist : IDisposable
 
     private async Task DownloadReportFileAsync(string name, string type)
     {
-        if (_session?.ReportFiles().FirstOrDefault(f => f.Path == name) is { } file)
+        if (Session?.ReportFiles().FirstOrDefault(f => f.Path == name) is { } file)
         {
             await JS.InvokeVoidAsync("todoExit.download", file.Path, type, file.Content);
         }

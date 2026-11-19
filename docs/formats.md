@@ -34,9 +34,11 @@ With read-only access, Microsoft Graph refuses to list attachments on personal a
 
 The report lists each loss by format, list and task, so you can fix the important ones by hand.
 
+No two files of an export get the same name. When two lists would produce the same file name, also when they differ only in upper and lower case, the later one gets ` (2)` added.
+
 ### When Microsoft Graph cannot return something
 
-Sometimes Graph itself cannot return a task. On one real account with about 12,700 tasks, 18 came back broken, all at the `linkedResources` property: Graph sent most of each task, failed partway through, and stopped. Every page that contained one of them was invalid JSON. todo-exit narrows such a page down until only the broken task is left and reads every other task normally. For the broken task it keeps every property Graph managed to send before it failed, marks the task with `"todoExitPartial": true`, and keeps its steps. The report names the property Graph failed on and the error Graph gave. If Graph failed before sending the task's id, the task is skipped and the report gives its position in the list.
+Sometimes Graph itself cannot return a task. On one real account with about 12,700 tasks, 18 came back broken, all at the `linkedResources` property: Graph sent most of each task, failed partway through, and stopped. Every page that contained one of them was invalid JSON. todo-exit narrows such a page down until only the broken task is left and reads every other task normally. For the broken task it keeps every property Graph managed to send before it failed, marks the task with `"todoExitPartial": true`, and reads its steps with a separate request. The report names the property Graph failed on and the error Graph gave. If Graph failed before sending the task's id, the task is skipped and the report gives its position in the list.
 
 All of this is recorded in a "Could not be read from Microsoft Graph" section at the top of `report.md`, and in `readErrors` in `report.json`. It applies to every format, including the JSON archive. The kinds are:
 

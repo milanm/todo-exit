@@ -35,9 +35,15 @@ public sealed record TodoistAccount(
     bool Reminders,
     IReadOnlyList<TodoistProject> Projects)
 {
+    /// <summary>Todoist's id of the user (user.id, a string). A transfer is bound to it.</summary>
+    public string? UserId { get; init; }
+
     /// <summary>Projects that count against max_projects: everything except the Inbox and archived projects.</summary>
     public int CountedProjects => Projects.Count(p => !p.IsInbox && !p.IsArchived);
 }
+
+/// <summary>Who a token belongs to: user.id and email, and the projects when they were asked for.</summary>
+public sealed record TodoistIdentity(string? UserId, string? Email, IReadOnlyList<TodoistProject> Projects);
 
 public enum TodoistFailure
 {
@@ -122,7 +128,18 @@ public sealed class TodoistClient
             MaxTasks: Int(current, "max_tasks"),
             MaxLabels: Int(current, "max_labels"),
             Reminders: Bool(current, "reminders") ?? false,
-            Projects: ParseProjects(root["projects"]));
+            Projects: ParseProjects(root["projects"]))
+        {
+            UserId = Id(user, "id"),
+        };
+    }
+
+    /// <summary>Reads who the token belongs to, and the projects when <paramref name="withProjects"/>. Read-only, one request.</summary>
+    public async Task<TodoistIdentity> ReadIdentityAsync(bool withProjects, CancellationToken cancellationToken)
+    {
+        var root = await ReadAsync(withProjects ? ["user", "projects"] : ["user"], cancellationToken).ConfigureAwait(false);
+        var user = root["user"] as JsonObject;
+        return new TodoistIdentity(Id(user, "id"), Str(user, "email"), withProjects ? ParseProjects(root["projects"]) : []);
     }
 
     /// <summary>Reads all active projects and tasks. Read-only. Used to find ids a lost response did not deliver.</summary>

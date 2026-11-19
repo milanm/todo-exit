@@ -22,8 +22,7 @@ public static class TodoistCsvExporter
     public static IReadOnlyList<ExportFile> Export(TodoArchive archive, bool includeCompleted, ICollection<Loss>? losses = null)
     {
         losses ??= new List<Loss>();
-        var names = FileNames.SanitizeUnique(archive.Lists.Select(l => l.Name));
-        var files = new List<ExportFile>();
+        var allParts = new List<List<List<Row>>>(archive.Lists.Count);
 
         for (var i = 0; i < archive.Lists.Count; i++)
         {
@@ -36,11 +35,7 @@ public static class TodoistCsvExporter
 
             var blocks = BuildBlocks(list, includeCompleted, losses);
             var parts = Split(blocks, list, losses);
-            if (parts.Count == 0)
-            {
-                continue;
-            }
-
+            allParts.Add(parts);
             if (parts.Count > 1)
             {
                 // A Todoist project holds at most 300 tasks (403 MAX_ITEMS_LIMIT_REACHED otherwise), so each part
@@ -49,18 +44,30 @@ public static class TodoistCsvExporter
                     $"This list has more than 300 tasks to import and was split into {parts.Count} files. Import each part into its own Todoist project.",
                     parts.Count));
             }
+        }
 
+        // Names are made unique over the final file names, after splitting: a list named "Work - part 1" must not
+        // overwrite the first part of a split list "Work".
+        var stems = FileNames.UniqueStems(
+            archive.Lists.Select(l => FileNames.Sanitize(l.Name)).ToList(),
+            allParts.Select(p => p.Count).ToList(),
+            PathOf);
+
+        var files = new List<ExportFile>();
+        for (var i = 0; i < archive.Lists.Count; i++)
+        {
+            var parts = allParts[i];
             for (var p = 0; p < parts.Count; p++)
             {
-                var path = parts.Count == 1
-                    ? $"todoist/{names[i]}.csv"
-                    : $"todoist/{names[i]} - part {p + 1}.csv";
-                files.Add(ExportFile.FromText(path, Render(parts[p])));
+                files.Add(ExportFile.FromText(PathOf(stems[i], p + 1, parts.Count), Render(parts[p])));
             }
         }
 
         return files;
     }
+
+    private static string PathOf(string stem, int part, int count) =>
+        count == 1 ? $"todoist/{stem}.csv" : $"todoist/{stem} - part {part}.csv";
 
     private static List<List<Row>> BuildBlocks(TaskList list, bool includeCompleted, ICollection<Loss> losses)
     {

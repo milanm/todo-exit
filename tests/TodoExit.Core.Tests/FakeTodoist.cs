@@ -71,6 +71,12 @@ internal sealed class FakeTodoist : HttpMessageHandler
 
     public List<Request> Requests { get; } = new();
 
+    /// <summary>The token this account accepts. Several fakes behind <see cref="TodoistAccounts"/> model several accounts.</summary>
+    public string AcceptedToken { get; init; } = Token;
+
+    /// <summary>user.id as the live API returns it: a string (8 characters on the test account).</summary>
+    public string UserId { get; set; } = "51234567";
+
     public string Email { get; set; } = "tester@example.com";
 
     public string PlanName { get; set; } = "Beginner";
@@ -150,7 +156,7 @@ internal sealed class FakeTodoist : HttpMessageHandler
             return Json("""{"error":"not found"}""", HttpStatusCode.NotFound);
         }
 
-        if (auth != "Bearer " + Token)
+        if (auth != "Bearer " + AcceptedToken)
         {
             return Json("""{"error":"Unauthorized","error_tag":"AUTH_INVALID_TOKEN","http_code":401}""", HttpStatusCode.Unauthorized);
         }
@@ -328,6 +334,7 @@ internal sealed class FakeTodoist : HttpMessageHandler
         {
             root["user"] = new JsonObject
             {
+                ["id"] = UserId,
                 ["email"] = Email,
                 ["is_premium"] = RemindersAllowed,
                 ["tz_info"] = new JsonObject { ["timezone"] = "Europe/Belgrade" },
@@ -421,4 +428,24 @@ internal sealed class FakeTodoist : HttpMessageHandler
 
     public static HttpResponseMessage Json(string json, HttpStatusCode status = HttpStatusCode.OK) =>
         new(status) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
+}
+
+/// <summary>Several Todoist accounts behind one handler: each request goes to the account whose token it carries.</summary>
+internal sealed class TodoistAccounts(params FakeTodoist[] accounts) : HttpMessageHandler
+{
+    /// <summary>Called before a request is passed on; may wait, for tests that change things while a request is in flight.</summary>
+    public Func<HttpRequestMessage, Task>? Before { get; set; }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        if (Before is { } before)
+        {
+            await before(request);
+        }
+
+        var auth = request.Headers.Authorization?.Parameter;
+        var account = accounts.FirstOrDefault(a => a.AcceptedToken == auth) ?? accounts[0];
+        using var invoker = new HttpMessageInvoker(account, disposeHandler: false);
+        return await invoker.SendAsync(request, cancellationToken);
+    }
 }

@@ -151,6 +151,12 @@ internal static class TransferCommand
             var result = await TodoistTransfer.RunAsync(plan, state, client!, Save, progress, cancellationToken);
             stopwatch.Stop();
             await stderr.WriteLineAsync();
+            if (result.Status == TransferStatus.WrongAccount)
+            {
+                // Checked before the first write: nothing was sent, and the state file is left as it was.
+                await stderr.WriteLineAsync($"error: {result.Message}");
+                return Program.ExitFailure;
+            }
 
             foreach (var file in TodoistTransferReport.ToFiles(archive, plan, state, result, stopwatch.Elapsed))
             {

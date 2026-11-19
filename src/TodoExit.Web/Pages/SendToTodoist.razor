@@ -17,13 +17,18 @@
         <label for="todoist-token">Todoist API token</label>
         <input id="todoist-token" class="text-input" type="password" autocomplete="off" autocapitalize="off" spellcheck="false"
                data-lpignore="true" data-1p-ignore="true" aria-describedby="todoist-token-hint"
-               disabled="@Running" @bind="_token" @bind:event="oninput" @bind:after="TokenChanged" />
+               disabled="@(Running || Planning)" @bind="_token" @bind:event="oninput" @bind:after="TokenChanged" />
         <p class="hint" id="todoist-token-hint">Find it in Todoist under Settings, Integrations, Developer. It stays in this tab's memory and is not saved anywhere.</p>
-        @if (_token.Length > 0 && !Running)
+        @if (_token.Length > 0 && !Running && !Planning)
         {
             <button type="button" class="link-button" @onclick="ForgetToken">Forget token</button>
         }
     </div>
+
+    @if (Blocked is { } blocked)
+    {
+        <p class="notice">@blocked</p>
+    }
 
     <fieldset class="options" disabled="@ChoicesLocked">
         <legend>Lists to transfer</legend>
@@ -39,7 +44,7 @@
         <p class="hint">Completed tasks take about 15 seconds per 100 items.</p>
     </fieldset>
 
-    @if (ChoicesLocked && !Running)
+    @if (Session?.HasUnfinishedTransfer == true && !Running)
     {
         <p>The choices cannot change until this transfer is finished. Continue it, or download its state and finish it with the command-line tool.</p>
     }
@@ -58,10 +63,11 @@
         <p class="error" role="alert">@_error</p>
     }
 
-    @if (_session?.Plan is { } plan)
+    @if (Session?.Plan is { } plan)
     {
+        var session = Session;
         <h3>Plan</h3>
-        @if (_session.State is null)
+        @if (session.State is null)
         {
             <p>Nothing has been written to Todoist. Showing the plan only read your Todoist account.</p>
         }
@@ -133,29 +139,51 @@
             </ul>
             <p>Then choose Show plan again.</p>
         }
-        else if (_session.State is null)
+        else if (session.State is null)
         {
             <label class="check"><input type="checkbox" @bind="_confirmed" /> I understand that this writes to my Todoist account and that todo-exit cannot undo it.</label>
         }
 
         <div class="actions">
-            @if (_session.State is null)
+            @if (session.State is null)
             {
                 <button type="button" class="button" disabled="@(!CanTransfer)" @onclick="TransferAsync">Transfer to Todoist</button>
             }
-            else if (_session.CanContinue && !Running)
+            else if (session.CanContinue && !Running)
             {
-                <button type="button" class="button" disabled="@(_token.Length == 0)" @onclick="TransferAsync">Continue</button>
+                <button type="button" class="button" disabled="@(!CanContinue)" @onclick="TransferAsync">Continue</button>
                 <button type="button" class="button secondary" @onclick="DownloadStateAsync">Download transfer state</button>
             }
         </div>
+
+        @if (session.HasUnfinishedTransfer && !Running)
+        {
+            @if (_confirmDiscard)
+            {
+                <div class="notice" role="alert">
+                    <p>
+                        Discarding forgets which projects and tasks this page has already created in Todoist. They stay in
+                        your Todoist account, and a new transfer would create them again. To finish this transfer later with
+                        the command-line tool, choose Download transfer state first.
+                    </p>
+                    <div class="actions">
+                        <button type="button" class="button secondary" @onclick="DiscardAsync">Discard this transfer</button>
+                        <button type="button" class="button" @onclick="KeepTransfer">Keep it</button>
+                    </div>
+                </div>
+            }
+            else
+            {
+                <button type="button" class="link-button" @onclick="AskDiscard">Discard this transfer</button>
+            }
+        }
 
         @if (Running)
         {
             <button type="button" class="link-button" @onclick="Cancel">Cancel</button>
         }
 
-        @if (_session.CanContinue && !Running)
+        @if (session.CanContinue && !Running)
         {
             <p class="hint">
                 Continue needs the token in the field above. The command-line tool can also continue this transfer:
@@ -165,9 +193,9 @@
         }
     }
 
-    @if (_session?.Result is not null)
+    @if (Session?.Result is not null)
     {
-        var c = _session.Counts();
+        var c = Session.Counts();
         <h3>Result</h3>
         <table class="table counts">
             <tbody>
@@ -181,10 +209,10 @@
             </tbody>
         </table>
 
-        @if (_session.State!.Errors.Count > 0)
+        @if (Session.State!.Errors.Count > 0)
         {
             <h4>What Todoist did not accept</h4>
-            @foreach (var group in _session.State.Errors.GroupBy(e => e.List))
+            @foreach (var group in Session.State.Errors.GroupBy(e => e.List))
             {
                 <p class="plan-list-name">@group.Key</p>
                 <ul class="loss-list">

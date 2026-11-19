@@ -6,6 +6,7 @@
 @using TodoExit.Core.Export
 @using TodoExit.Core.Graph
 @using TodoExit.Core.Model
+@using TodoExit.Core.Todoist
 @implements IDisposable
 @inject AppSettings Settings
 @inject HttpClient AppHttp
@@ -67,6 +68,11 @@
         }
         <button type="button" class="button secondary" disabled="@Busy" @onclick="LoadSampleAsync">Try with sample data</button>
     </div>
+
+    @if (_state != State.Reading && _workspace.ArchiveLockReason is { } locked)
+    {
+        <p class="notice">@locked</p>
+    }
 
     @if (_signedInHint && _state != State.Reading && !_hasRead)
     {
@@ -237,7 +243,7 @@
         }
     </section>
 
-    <SendToTodoist Document="_document!" Archive="_archive" IsSample="_isSample" BusyChanged="b => _todoistBusy = b" />
+    <SendToTodoist Workspace="_workspace" IsSample="_isSample" ActivityChanged="() => { }" />
 }
 
 @code {
@@ -268,10 +274,14 @@
     private bool _csv = true;
     private bool _includeCompleted;
 
-    private bool Busy => _state == State.Reading || _todoistBusy;
+    /// <summary>
+    /// The archive and its Todoist transfer, shared with step 5. It decides what may start: no new archive while a
+    /// transfer runs or is unfinished, and no Todoist work while Microsoft Graph is read.
+    /// </summary>
+    private ArchiveWorkspace _workspace = default!;
 
-    /// <summary>Step 5 is reading the Todoist account or transferring; the archive must not change under it.</summary>
-    private bool _todoistBusy;
+    private bool Busy => _state == State.Reading || !_workspace.CanReplaceArchive;
+
     private bool _isSample;
 
     private ExportFormats SelectedFormats =>
@@ -280,6 +290,7 @@
 
     protected override async Task OnInitializedAsync()
     {
+        _workspace = new ArchiveWorkspace(() => HttpFactory.CreateClient(AppSettings.TodoistClientName));
         if (!Settings.SignInConfigured)
         {
             return;
@@ -320,6 +331,11 @@
 
     private async Task ReadFromGraphAsync()
     {
+        if (!_workspace.TryBeginGraphRead())
+        {
+            return; // a Todoist transfer is running or unfinished; the page says so
+        }
+
         _error = null;
         _partial = null;
         _state = State.Reading;
@@ -339,8 +355,10 @@
             });
             var document = await reader.ReadAsync(progress, _cts.Token);
             _hasRead = true;
-            _isSample = false;
-            SetArchive(document, "Read from your Microsoft account just now.");
+            if (SetArchive(document, "Read from your Microsoft account just now."))
+            {
+                _isSample = false;
+            }
         }
         catch (GraphReadInterruptedException ex)
         {
@@ -356,17 +374,28 @@
             _partial = nothingRead ? null : ex.PartialArchive;
             _error = ex.WasCancelled ? "Reading was cancelled." : "Reading stopped: " + ex.Reason;
         }
+        finally
+        {
+            _workspace.EndGraphRead();
+        }
     }
 
     private async Task LoadSampleAsync()
     {
+        if (!_workspace.CanReplaceArchive)
+        {
+            return;
+        }
+
         _error = null;
         try
         {
             var bytes = await AppHttp.GetByteArrayAsync("sample/sample-archive.json");
             var document = TodoArchiveDocument.Parse(bytes);
-            _isSample = true;
-            SetArchive(document, "Showing sample data for a fictional account. None of it is yours.");
+            if (SetArchive(document, "Showing sample data for a fictional account. None of it is yours."))
+            {
+                _isSample = true;
+            }
         }
         catch (Exception ex) when (ex is HttpRequestException or InvalidDataException)
         {
@@ -374,14 +403,24 @@
         }
     }
 
-    private void SetArchive(TodoArchiveDocument document, string source)
+    /// <summary>Shows a new archive. False when step 5 has a running or unfinished transfer; nothing changes then.</summary>
+    private bool SetArchive(TodoArchiveDocument document, string source)
     {
+        var archive = ArchiveParser.Parse(document, TimeZoneInfo.Local);
+        if (!_workspace.TrySetArchive(document, archive))
+        {
+            _state = _archive is null ? State.Idle : State.Ready;
+            _error = "The new tasks were not shown. " + _workspace.ArchiveLockReason;
+            return false;
+        }
+
         _document = document;
-        _archive = ArchiveParser.Parse(document, TimeZoneInfo.Local);
+        _archive = archive;
         _inventory = Inventory.From(_archive);
         _source = source;
         _state = State.Ready;
         Recalculate();
+        return true;
     }
 
     private void Recalculate()
@@ -392,7 +431,15 @@
             return;
         }
 
-        _report = ExportService.Export(_document, _archive, new ExportOptions(SelectedFormats, _includeCompleted)).Report;
+        try
+        {
+            _report = ExportService.Export(_document, _archive, new ExportOptions(SelectedFormats, _includeCompleted)).Report;
+        }
+        catch (ExportPathConflictException ex)
+        {
+            _report = null;
+            _error = ex.Message;
+        }
     }
 
     private async Task DownloadPartialAsync()
@@ -420,7 +467,17 @@
             return;
         }
 
-        var result = ExportService.Export(_document, _archive, new ExportOptions(SelectedFormats, _includeCompleted));
+        ExportResult result;
+        try
+        {
+            result = ExportService.Export(_document, _archive, new ExportOptions(SelectedFormats, _includeCompleted));
+        }
+        catch (ExportPathConflictException ex)
+        {
+            _error = ex.Message;
+            return;
+        }
+
         using var buffer = new MemoryStream();
         using (var zip = new ZipArchive(buffer, ZipArchiveMode.Create, leaveOpen: true))
         {

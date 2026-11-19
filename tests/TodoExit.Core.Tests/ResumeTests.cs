@@ -184,19 +184,39 @@ public class ResumeTests
     [Fact]
     public async Task Resume_keeps_earlier_read_errors_without_duplicates()
     {
-        // Poisoned task at 120: its error is recorded during bisection of window 100, then the read stops
-        // before that window is finished. The resumed run re-reads the window and meets the same task again.
+        // Poisoned task at 120: its error is recorded when window 100 is finished; the read stops at window 200.
+        // The resumed run starts at 200 and must not record the error again.
         var graph = Account(poisonedAt: 120);
-        var partial = await InterruptAsync(graph, r => r.Url == $"{Base}me/todo/lists/L1/tasks?$top=50&$skip=150");
+        var partial = await InterruptAsync(graph, r => r.Url == $"{Base}me/todo/lists/L1/tasks?$top=100&$skip=200");
 
-        Assert.Equal(new ListReadProgress("L1", false, 100, false, false), ProgressOf(partial, "L1"));
-        Assert.Equal(100, Tasks(partial, "L1").Count);
+        Assert.Equal(new ListReadProgress("L1", false, 200, false, false), ProgressOf(partial, "L1"));
+        Assert.Equal(199, Tasks(partial, "L1").Count);
         var error = Assert.Single(partial.ReadNotes.Errors);
         Assert.Equal((ReadErrorKinds.TaskUnreadable, 120), (error.Kind, error.Position!.Value));
 
         var resumed = await Reader(graph).ReadAsync(resumeFrom: partial);
 
         Assert.Single(resumed.ReadNotes.Errors);
+        Assert.Equal(229, Tasks(resumed, "L1").Count);
+        Assert.True(JsonNode.DeepEquals(Normalized(Baseline(poisonedAt: 120)), Normalized(resumed)));
+    }
+
+    [Fact]
+    public async Task Read_stopped_inside_a_bisected_window_keeps_neither_its_tasks_nor_its_errors()
+    {
+        // The error for 120 is found during bisection of window 100, then the read stops before that window is
+        // finished. Like its tasks, the window's errors are not kept; the resumed run reads the window again.
+        var graph = Account(poisonedAt: 120);
+        var partial = await InterruptAsync(graph, r => r.Url == $"{Base}me/todo/lists/L1/tasks?$top=50&$skip=150");
+
+        Assert.Equal(new ListReadProgress("L1", false, 100, false, false), ProgressOf(partial, "L1"));
+        Assert.Equal(100, Tasks(partial, "L1").Count);
+        Assert.Empty(partial.ReadNotes.Errors);
+
+        var resumed = await Reader(graph).ReadAsync(resumeFrom: partial);
+
+        var error = Assert.Single(resumed.ReadNotes.Errors);
+        Assert.Equal((ReadErrorKinds.TaskUnreadable, 120), (error.Kind, error.Position!.Value));
         Assert.Equal(229, Tasks(resumed, "L1").Count);
         Assert.True(JsonNode.DeepEquals(Normalized(Baseline(poisonedAt: 120)), Normalized(resumed)));
     }

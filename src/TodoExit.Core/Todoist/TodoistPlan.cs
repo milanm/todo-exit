@@ -185,11 +185,12 @@ public static class TodoistPlanner
         var limit = Math.Max(1, settings.MaxTasksPerProject);
         var losses = new List<Loss>();
         var selected = settings.Lists?.ToHashSet(StringComparer.Ordinal);
-        var projectNames = UniqueNames(archive.Lists.Select(l => TodoistMapping.OneLine(l.Name).Trim()));
         var listKeys = UniqueKeys(archive.Lists.Select(l => l.Id), "list");
         var usedTaskKeys = new HashSet<string>(StringComparer.Ordinal);
-        var lists = new List<ListPlan>();
 
+        // First the parts of every list, then the names: project names are unique over the final names, after
+        // splitting, so a list named "Work - part 1" cannot get the same name as a part of a split list "Work".
+        var listParts = new List<List<List<PlannedItem>>?>(archive.Lists.Count);
         for (var i = 0; i < archive.Lists.Count; i++)
         {
             var list = archive.Lists[i];
@@ -201,7 +202,7 @@ public static class TodoistPlanner
                         "This list was not chosen for the transfer.", list.Tasks.Count));
                 }
 
-                lists.Add(new ListPlan(list.Name, [], "not chosen"));
+                listParts.Add(null);
                 continue;
             }
 
@@ -228,23 +229,47 @@ public static class TodoistPlanner
             }
 
             var parts = Pack(blocks, limit, list, losses);
-            var projects = new List<PlannedProject>();
-            for (var p = 0; p < parts.Count; p++)
-            {
-                var key = $"p:{listKey}:{p + 1}";
-                var name = parts.Count == 1 ? projectNames[i] : $"{projectNames[i]} - part {p + 1}";
-                projects.Add(new PlannedProject(key, name, list.Name, p + 1,
-                    parts[p].Select(item => item with { ProjectKey = key }).ToList()));
-            }
-
+            listParts.Add(parts);
             if (parts.Count > 1)
             {
                 losses.Add(new Loss(Format, list.Name, null, LossKinds.ListSplit,
                     $"This list has more than {limit} active tasks for one Todoist project and was split into {parts.Count} projects.",
                     parts.Count));
             }
+        }
+
+        // Same rule as the CSV file names: duplicates (ignoring case) get " (2)", " (3)" ... Empty names become
+        // "Untitled list". Every list keeps its name reserved, chosen or not.
+        var projectNames = FileNames.UniqueStems(
+            archive.Lists.Select(l => TodoistMapping.OneLine(l.Name).Trim() is { Length: > 0 } n ? n : "Untitled list").ToList(),
+            listParts.Select(p => p?.Count ?? 0).ToList(),
+            ProjectName);
+
+        var lists = new List<ListPlan>();
+        for (var i = 0; i < archive.Lists.Count; i++)
+        {
+            var list = archive.Lists[i];
+            if (listParts[i] is not { } parts)
+            {
+                lists.Add(new ListPlan(list.Name, [], "not chosen"));
+                continue;
+            }
+
+            var projects = new List<PlannedProject>();
+            for (var p = 0; p < parts.Count; p++)
+            {
+                var key = $"p:{listKeys[i]}:{p + 1}";
+                projects.Add(new PlannedProject(key, ProjectName(projectNames[i], p + 1, parts.Count), list.Name, p + 1,
+                    parts[p].Select(item => item with { ProjectKey = key }).ToList()));
+            }
 
             lists.Add(new ListPlan(list.Name, projects, projects.Count == 0 ? "nothing to transfer" : null));
+        }
+
+        if (FileNames.SameFileGroups(lists.SelectMany(l => l.Projects).Select(p => p.Name)).Count > 0)
+        {
+            // Id recovery after a lost response matches projects by name, so two planned projects may never share one.
+            throw new InvalidOperationException("Two planned Todoist projects have the same name.");
         }
 
         var problems = new List<string>();
@@ -454,23 +479,5 @@ public static class TodoistPlanner
         return ids.Select((id, i) => UniqueKey(used, string.IsNullOrEmpty(id) ? $"{fallback}{i}" : id)).ToList();
     }
 
-    /// <summary>Same as the CSV file names: duplicates (ignoring case) get " (2)", " (3)" ... Empty names become "Untitled list".</summary>
-    private static List<string> UniqueNames(IEnumerable<string> names)
-    {
-        var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var result = new List<string>();
-        foreach (var name in names)
-        {
-            var baseName = name.Length == 0 ? "Untitled list" : name;
-            var candidate = baseName;
-            for (var n = 2; !used.Add(candidate); n++)
-            {
-                candidate = $"{baseName} ({n})";
-            }
-
-            result.Add(candidate);
-        }
-
-        return result;
-    }
+    private static string ProjectName(string stem, int part, int count) => count == 1 ? stem : $"{stem} - part {part}";
 }

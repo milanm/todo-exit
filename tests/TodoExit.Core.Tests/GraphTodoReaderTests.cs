@@ -533,8 +533,10 @@ public class GraphTodoReaderTests
     }
 
     [Fact]
-    public async Task A_list_that_fails_everywhere_does_not_loop_forever()
+    public async Task A_list_that_fails_everywhere_does_not_loop_forever_and_is_not_marked_complete()
     {
+        // Every task request answers 400. Nothing in the window ever answers, so this is not a set of unreadable
+        // tasks: the read stops with the list incomplete instead of recording 200 unreadable tasks.
         var graph = new FakeGraph();
         graph.AddList("L1", "One", 3);
         graph.Intercept = (r, _) => r.Url.Contains("/tasks?")
@@ -542,11 +544,16 @@ public class GraphTodoReaderTests
             : null;
 
         var (reader, _) = Create(graph);
-        var doc = await reader.ReadAsync();
+        var interrupted = await Assert.ThrowsAsync<GraphReadInterruptedException>(() => reader.ReadAsync());
 
-        Assert.Empty(ArchiveTasks(doc));
-        Assert.All(doc.ReadNotes.Errors, e => Assert.Equal(ReadErrorKinds.TaskUnreadable, e.Kind));
-        Assert.Equal(2 * GraphTodoReader.PageSize, doc.ReadNotes.Errors.Count);
+        var doc = interrupted.PartialArchive;
+        Assert.True(doc.ReadNotes.Interrupted);
+        Assert.Empty(doc.ReadNotes.Errors);
+        Assert.Equal(new ListReadProgress("L1", false, 0, false, false), Assert.Single(doc.ReadNotes.Progress));
+        Assert.Contains("answered no request for positions 0 to 99", interrupted.Reason);
+        Assert.Contains("400", interrupted.Reason);
+        // The list, the window, its left halves down to one task, and one more single-task window.
+        Assert.Equal(9, graph.Requests.Count);
     }
 
     [Fact]

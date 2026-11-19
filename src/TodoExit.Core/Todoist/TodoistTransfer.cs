@@ -22,6 +22,9 @@ public enum TransferStatus
 
     /// <summary>Stopped by an error that a retry would not fix (token rejected, request refused).</summary>
     Failed,
+
+    /// <summary>The token belongs to another Todoist account than the plan or the state. Nothing was written.</summary>
+    WrongAccount,
 }
 
 public sealed record TodoistTransferResult(TransferStatus Status, string? Message);
@@ -88,6 +91,8 @@ public static class TodoistTransfer
         StartedAt = now,
         Settings = plan.Settings,
         PreexistingProjectIds = (plan.Account?.Projects.Select(p => p.Id) ?? []).ToHashSet(StringComparer.Ordinal),
+        TodoistUserId = plan.Account?.UserId,
+        TodoistEmail = plan.Account?.Email,
     };
 
     /// <summary>How many of the plan's commands the state marks as done.</summary>
@@ -181,6 +186,18 @@ public static class TodoistTransfer
         client.Waiting = (wait, reason) => Report(wait, reason);
         try
         {
+            // Before anything else, and before every resume or Continue: is this the account the transfer belongs to?
+            var bindingBefore = state.TodoistUserId;
+            if (await CheckAccountAsync(plan, state, client, cancellationToken).ConfigureAwait(false) is { } wrong)
+            {
+                return new TodoistTransferResult(TransferStatus.WrongAccount, wrong);
+            }
+
+            if (bindingBefore != state.TodoistUserId)
+            {
+                await save(state, CancellationToken.None).ConfigureAwait(false);
+            }
+
             if (state.Unresolved.Count > 0)
             {
                 await RecoverAsync(plan, state, client, cancellationToken).ConfigureAwait(false);
@@ -239,6 +256,61 @@ public static class TodoistTransfer
             client.Waiting = previousWaiting;
         }
     }
+
+    /// <summary>
+    /// Reads the account behind the token (one read request) and compares it with the account the transfer belongs to.
+    /// Returns a message when it is another account; nothing may be written then. Binds a state that has no account yet.
+    /// </summary>
+    /// <remarks>
+    /// The expected account is the state's <see cref="TodoistTransferState.TodoistUserId"/>, or the plan's account
+    /// when the state has none. A state saved by an earlier version has no user id: if it never sent anything it is
+    /// bound to the token's account (nothing exists to collide with); otherwise it is bound only when the token's
+    /// account holds a project this transfer created, or its Inbox is one of the projects recorded before the transfer
+    /// started. If neither is found, the run is refused.
+    /// </remarks>
+    internal static async Task<string?> CheckAccountAsync(
+        TodoistPlan plan, TodoistTransferState state, TodoistClient client, CancellationToken cancellationToken)
+    {
+        var legacy = state.TodoistUserId is null && state.Sent.Count > 0;
+        var actual = await client.ReadIdentityAsync(withProjects: legacy, cancellationToken).ConfigureAwait(false);
+        if (actual.UserId is null)
+        {
+            return "Todoist did not say which account this token belongs to, so nothing was written. Try again.";
+        }
+
+        if (state.TodoistUserId is { } bound)
+        {
+            return bound == actual.UserId ? null : WrongAccountMessage(state.TodoistEmail ?? plan.Account?.Email, actual.Email);
+        }
+
+        if (plan.Account?.UserId is { } planned && planned != actual.UserId)
+        {
+            return WrongAccountMessage(plan.Account.Email, actual.Email);
+        }
+
+        if (legacy)
+        {
+            var ours = plan.Projects
+                .Select(p => state.Ids.TryGetValue(p.Key, out var id) ? id : null)
+                .Where(id => !string.IsNullOrEmpty(id))
+                .ToHashSet(StringComparer.Ordinal);
+            var found = actual.Projects.Any(p => ours.Contains(p.Id) || (p.IsInbox && state.PreexistingProjectIds.Contains(p.Id)));
+            if (!found)
+            {
+                return "This transfer state was saved by an earlier version of todo-exit and does not record its Todoist account, " +
+                    $"and none of its projects were found in the account of this token ({actual.Email ?? "unknown email"}). Nothing was written. " +
+                    "Use the token of the account the transfer started in, or start a new transfer.";
+            }
+        }
+
+        state.TodoistUserId = actual.UserId;
+        state.TodoistEmail = actual.Email;
+        return null;
+    }
+
+    private static string WrongAccountMessage(string? expected, string? actual) =>
+        $"This token belongs to a different Todoist account ({actual ?? "unknown email"}) than the one this transfer is for " +
+        $"({expected ?? "unknown email"}). Nothing was written. Use the token of {expected ?? "that account"}, or make a new plan.";
 
     /// <summary>
     /// The next request: the pending commands when a request is in doubt, otherwise up to 100 commands in order.

@@ -61,14 +61,29 @@ public sealed class GraphRequestException : Exception
     private static readonly string[] DeniedCodes =
         ["accessDenied", "ErrorAccessDenied", "Forbidden", "Authorization_RequestDenied", "ErrorInsufficientPermissionsInAccessToken"];
 
-    public GraphRequestException(string message, HttpStatusCode? statusCode = null, string? graphErrorCode = null, Exception? inner = null)
+    public GraphRequestException(
+        string message, HttpStatusCode? statusCode = null, string? graphErrorCode = null, Exception? inner = null, bool isOutage = false)
         : base(message, inner)
     {
         StatusCode = statusCode;
         GraphErrorCode = graphErrorCode;
+        IsOutage = isOutage;
     }
 
     public HttpStatusCode? StatusCode { get; }
+
+    /// <summary>
+    /// Graph or the network was not available, so the failure says nothing about the data: a network error or timeout,
+    /// or 429, 502, 503 or 504, still failing after every retry. A read that meets an outage stops with a checkpoint
+    /// and never records the data it was reading as unreadable.
+    /// </summary>
+    public bool IsOutage { get; }
+
+    /// <summary>
+    /// An error status that may come from one record Graph cannot serialize as well as from the service:
+    /// 500 and other 5xx statuses that are not an outage. Only a 2xx or 4xx answer for other records tells them apart.
+    /// </summary>
+    internal bool IsAmbiguousServerError => !IsOutage && StatusCode is { } s && (int)s >= 500;
 
     public string? GraphErrorCode { get; }
 
@@ -472,8 +487,9 @@ public sealed class GraphTodoReader
 
     /// <summary>
     /// Reads all tasks with explicit $top/$skip windows. @odata.nextLink is only the signal that more pages exist.
-    /// A window that cannot be read (invalid JSON twice, or an error status other than 401) is bisected,
-    /// so every readable task is still read.
+    /// A window that cannot be read (invalid JSON twice, or an error status other than 401, access denied or an
+    /// outage) is bisected, so every readable task is still read. An outage is never bisected: it stops the read with
+    /// the checkpoint at the start of the window.
     /// </summary>
     private async Task ReadTasksAsync(
         ListContext list, ListState state, RunState run, IProgress<ReadProgress>? progress, CancellationToken cancellationToken)
@@ -508,31 +524,84 @@ public sealed class GraphTodoReader
 
             // Broken window: read what can be read, then continue with the next window.
             // If this was the last window, the next request returns an empty page without a nextLink.
-            // Bisection collects into a separate list so an interruption does not leave half a window behind.
-            var window = new List<JsonObject>();
-            var errorsBefore = ErrorCount();
+            // Bisection collects tasks and errors separately, so an interruption leaves nothing of the window behind.
+            var window = new WindowRead(skip, PageSize) { Responded = result.RawBody is not null, LastError = result.Error };
             await BisectAsync(list, skip, PageSize, result, window, cancellationToken).ConfigureAwait(false);
-            state.Tasks.AddRange(window);
+            if (!window.Responded)
+            {
+                throw WindowOutage(list, window);
+            }
+
+            state.Tasks.AddRange(window.Tasks);
+            foreach (var error in window.Errors)
+            {
+                AddError(error);
+            }
+
             state.NextSkip = skip + PageSize;
             progress?.Report(new ReadProgress(ReadPhase.Tasks, list.Index, list.Total, run.TasksRead, list.Name));
 
-            var dead = window.Count == 0 && ErrorCount() > errorsBefore;
+            var dead = window.Tasks.Count == 0 && window.Errors.Count > 0;
             deadWindows = dead ? deadWindows + 1 : 0;
             if (deadWindows >= MaxDeadWindows)
             {
-                // Every request in the last windows failed: stop instead of probing forever.
-                break;
+                // No task came out of the last windows: stop instead of probing forever. The list is not complete,
+                // so a resumed read continues after these windows.
+                throw new GraphRequestException(
+                    $"Microsoft Graph returned no readable task in {MaxDeadWindows * PageSize} positions in a row in the list '{list.Name}', " +
+                    $"up to position {skip + PageSize - 1}. The read stopped there; the list is not complete.");
             }
         }
     }
 
+    /// <summary>What bisecting one window produced. Committed to the list only when the whole window is done.</summary>
+    private sealed class WindowRead(int skip, int top)
+    {
+        public int Skip { get; } = skip;
+
+        public int Top { get; } = top;
+
+        public List<JsonObject> Tasks { get; } = new();
+
+        public List<ReadError> Errors { get; } = new();
+
+        /// <summary>Some request for this window got a 2xx answer, even if its body was not valid JSON.</summary>
+        public bool Responded { get; set; }
+
+        /// <summary>A single-task window failed with an error status while nothing in the window had answered yet.</summary>
+        public bool LeafFailedBeforeAnyAnswer { get; set; }
+
+        public GraphRequestException? LastError { get; set; }
+    }
+
+    /// <summary>No request inside a window got an answer: Graph is not available, whatever status it sent.</summary>
+    private static GraphRequestException WindowOutage(ListContext list, WindowRead window)
+    {
+        var last = window.LastError;
+        return new GraphRequestException(
+            $"Microsoft Graph answered no request for positions {window.Skip} to {window.Skip + window.Top - 1} of the list '{list.Name}', " +
+            "so the read stopped there and nothing in that range was recorded as unreadable." +
+            (last is null ? string.Empty : $" Last error: {last.Message}"),
+            last?.StatusCode, last?.GraphErrorCode, last, isOutage: true);
+    }
+
     /// <param name="failed">The failed result for [skip, skip+top). Its raw body is used to salvage a single task.</param>
+    /// <remarks>
+    /// An error status can come from one record or from the service. Once a single-task window has failed with an error
+    /// status before anything in the window answered, the next such failure without an answer in between ends the
+    /// window as an outage. This bounds a persistent 500 to about log2(PageSize) + 2 requests.
+    /// </remarks>
     private async Task BisectAsync(
-        ListContext list, int skip, int top, PageResult failed, List<JsonObject> into, CancellationToken cancellationToken)
+        ListContext list, int skip, int top, PageResult failed, WindowRead window, CancellationToken cancellationToken)
     {
         if (top <= 1)
         {
-            Salvage(list, skip, failed, into);
+            if (!window.Responded && failed.RawBody is null)
+            {
+                window.LeafFailedBeforeAnyAnswer = true;
+            }
+
+            Salvage(list, skip, failed, window);
             return;
         }
 
@@ -543,8 +612,9 @@ public sealed class GraphTodoReader
             var result = await TryGetPageAsync(PageUrl(list, s, t), cancellationToken).ConfigureAwait(false);
             if (result.Page is { } page)
             {
+                window.Responded = true;
                 var values = TakeValues(page);
-                into.AddRange(values);
+                window.Tasks.AddRange(values);
                 if (values.Count < t && GetString(page, "@odata.nextLink") is null)
                 {
                     return; // past the end of the list
@@ -552,7 +622,20 @@ public sealed class GraphTodoReader
             }
             else
             {
-                await BisectAsync(list, s, t, result, into, cancellationToken).ConfigureAwait(false);
+                if (result.RawBody is not null)
+                {
+                    window.Responded = true;
+                }
+                else
+                {
+                    window.LastError = result.Error ?? window.LastError;
+                    if (!window.Responded && window.LeafFailedBeforeAnyAnswer)
+                    {
+                        throw WindowOutage(list, window);
+                    }
+                }
+
+                await BisectAsync(list, s, t, result, window, cancellationToken).ConfigureAwait(false);
             }
         }
     }
@@ -561,7 +644,7 @@ public sealed class GraphTodoReader
     /// A single task whose page could not be read. If Graph sent a broken body, keep every property it managed
     /// to send. Without an id the task is recorded as unreadable.
     /// </summary>
-    private void Salvage(ListContext list, int position, PageResult failed, List<JsonObject> into)
+    private static void Salvage(ListContext list, int position, PageResult failed, WindowRead window)
     {
         if (failed.RawBody is { } raw)
         {
@@ -583,25 +666,25 @@ public sealed class GraphTodoReader
             else if (GetString(task, "id") is { } id)
             {
                 task[ReadNotes.PartialMarker] = true;
-                into.Add(task);
-                AddError(new ReadError(ReadErrorKinds.TaskPartial, list.Id, list.Name, id, GetString(task, "title"), position,
+                window.Tasks.Add(task);
+                window.Errors.Add(new ReadError(ReadErrorKinds.TaskPartial, list.Id, list.Name, id, GetString(task, "title"), position,
                     DescribeBreak(salvaged) + " The task is kept with the properties Graph sent before that."));
                 return;
             }
             else
             {
-                AddError(new ReadError(ReadErrorKinds.TaskUnreadable, list.Id, list.Name, null, GetString(task, "title"), position,
+                window.Errors.Add(new ReadError(ReadErrorKinds.TaskUnreadable, list.Id, list.Name, null, GetString(task, "title"), position,
                     DescribeBreak(salvaged) + " The task id was not among the properties Graph sent, so the task is not in the archive."));
                 return;
             }
 
-            AddError(new ReadError(ReadErrorKinds.TaskUnreadable, list.Id, list.Name, null, null, position,
+            window.Errors.Add(new ReadError(ReadErrorKinds.TaskUnreadable, list.Id, list.Name, null, null, position,
                 "Graph returned broken data for this task and nothing could be recovered. The task is not in the archive."));
             return;
         }
 
         var reason = failed.Error is { } error ? error.Message : "Graph returned no usable data for this task.";
-        AddError(new ReadError(ReadErrorKinds.TaskUnreadable, list.Id, list.Name, null, null, position,
+        window.Errors.Add(new ReadError(ReadErrorKinds.TaskUnreadable, list.Id, list.Name, null, null, position,
             reason + " The task is not in the archive."));
     }
 
@@ -635,8 +718,9 @@ public sealed class GraphTodoReader
                 continue; // already read (earlier run), or Graph may start honoring $expand one day
             }
 
-            // No inline array means the task has no steps (measured on a live account).
-            if (!VerifySteps || GetString(task, "id") is null)
+            // No inline array means the task has no steps (measured on a live account). That does not hold for a task
+            // salvaged from a broken body: the body was cut before "checklistItems", so its steps are always requested.
+            if (GetString(task, "id") is null || (!VerifySteps && !IsPartial(task)))
             {
                 task["checklistItems"] = new JsonArray();
                 continue;
@@ -743,8 +827,10 @@ public sealed class GraphTodoReader
 
         Report();
 
-        var isSteps = kind == StepsCollection;
+        // StepReadMode describes the --verify-steps requests; steps of salvaged tasks are read without changing it.
+        var isSteps = kind == StepsCollection && VerifySteps;
         var individual = new List<JsonObject>();
+        var answered = false;
         if (_batchUnavailable)
         {
             individual.AddRange(pending);
@@ -756,7 +842,9 @@ public sealed class GraphTodoReader
                 StepReadMode = "batch";
             }
 
-            individual.AddRange(await RunBatchesAsync(list, kind, pending, MarkDone, cancellationToken).ConfigureAwait(false));
+            var batches = await RunBatchesAsync(list, kind, pending, MarkDone, cancellationToken).ConfigureAwait(false);
+            individual.AddRange(batches.Individual);
+            answered = batches.Answered;
         }
 
         if (individual.Count == 0)
@@ -769,48 +857,122 @@ public sealed class GraphTodoReader
             StepReadMode = "individual";
         }
 
-        var isAttachments = kind == AttachmentsCollection;
+        // A 500 for one task can come from that task or from the service. It is recorded as unreadable only after
+        // Graph has answered a request for another task in this pass; until then the task waits for a second try.
+        var deferred = new List<JsonObject>();
+        GraphRequestException? lastAmbiguous = null;
         foreach (var task in individual)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (isAttachments && _attachmentsDenied)
+            var outcome = await ReadOneAsync(list, kind, task, recordAmbiguous: answered, cancellationToken).ConfigureAwait(false);
+            if (outcome.Denied)
             {
                 break;
             }
 
-            var url = list.TaskUrl(GetString(task, "id")!) + "/" + kind.Segment;
-            JsonArray items;
-            try
+            if (outcome.Deferred is { } ambiguous)
             {
-                var failed = false;
-                items = await GetOptionalCollectionAsync(url,
-                    () => { failed = true; AddKindError(list, kind, task, $"Graph returned invalid JSON for the {kind.Noun} of this task."); },
-                    ex => { failed = true; AddKindError(list, kind, task, ex.Message); },
-                    cancellationToken,
-                    rethrowAccessDenied: isAttachments).ConfigureAwait(false);
-                if (isAttachments && !failed)
-                {
-                    _attachmentsSucceeded = true;
-                }
+                lastAmbiguous = ambiguous;
+                deferred.Add(task);
+                continue;
             }
-            catch (GraphRequestException ex) when (isAttachments && ex.IsAccessDenied)
+
+            answered |= outcome.Answered;
+            MarkDone(1);
+        }
+
+        if (deferred.Count == 0 || (kind == AttachmentsCollection && _attachmentsDenied))
+        {
+            return;
+        }
+
+        if (!answered)
+        {
+            throw new GraphRequestException(
+                $"Microsoft Graph answered no request for the {kind.Noun} in the list '{list.Name}' (last error: {lastAmbiguous!.Message}) " +
+                "The read stopped there; nothing was recorded as unreadable.",
+                lastAmbiguous.StatusCode, lastAmbiguous.GraphErrorCode, lastAmbiguous, isOutage: true);
+        }
+
+        foreach (var task in deferred)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var outcome = await ReadOneAsync(list, kind, task, recordAmbiguous: true, cancellationToken).ConfigureAwait(false);
+            if (outcome.Denied)
             {
-                MarkAttachmentsDenied(Short(ex.StatusCode, ex.GraphErrorCode));
                 break;
             }
 
-            Store(task, kind, items);
             MarkDone(1);
         }
     }
 
+    /// <param name="Answered">Graph answered for this task (2xx, or a 4xx about it).</param>
+    /// <param name="Deferred">The request failed with an ambiguous 5xx and was not recorded.</param>
+    /// <param name="Denied">Graph refused attachments; stop asking.</param>
+    private sealed record OneOutcome(bool Answered, GraphRequestException? Deferred = null, bool Denied = false);
+
+    /// <summary>
+    /// Reads one task's collection with individual GETs. An outage and a token problem are thrown; access denied for
+    /// attachments stops the attachment requests. Other errors are recorded for the task, except an ambiguous 5xx
+    /// when <paramref name="recordAmbiguous"/> is false.
+    /// </summary>
+    private async Task<OneOutcome> ReadOneAsync(
+        ListContext list, SubCollection kind, JsonObject task, bool recordAmbiguous, CancellationToken cancellationToken)
+    {
+        var isAttachments = kind == AttachmentsCollection;
+        if (isAttachments && _attachmentsDenied)
+        {
+            return new OneOutcome(false, Denied: true);
+        }
+
+        var url = list.TaskUrl(GetString(task, "id")!) + "/" + kind.Segment;
+        List<JsonObject>? items;
+        try
+        {
+            items = await GetCollectionAsync(url, cancellationToken).ConfigureAwait(false);
+        }
+        catch (GraphRequestException ex) when (isAttachments && ex.IsAccessDenied)
+        {
+            MarkAttachmentsDenied(Short(ex.StatusCode, ex.GraphErrorCode));
+            return new OneOutcome(false, Denied: true);
+        }
+        catch (GraphRequestException ex) when (!ex.IsTokenProblem && !ex.IsOutage)
+        {
+            if (ex.IsAmbiguousServerError && !recordAmbiguous)
+            {
+                return new OneOutcome(false, Deferred: ex);
+            }
+
+            AddKindError(list, kind, task, ex.Message);
+            task[kind.Segment] = new JsonArray();
+            return new OneOutcome(!ex.IsAmbiguousServerError);
+        }
+
+        if (items is null)
+        {
+            AddKindError(list, kind, task, $"Graph returned invalid JSON for the {kind.Noun} of this task.");
+            task[kind.Segment] = new JsonArray();
+            return new OneOutcome(true);
+        }
+
+        if (isAttachments)
+        {
+            _attachmentsSucceeded = true;
+        }
+
+        Store(task, kind, ToArray(items));
+        return new OneOutcome(true);
+    }
+
     /// <summary>
     /// Stores a collection on a task. Attachment content is never requested; drop it defensively if present.
-    /// Steps stored here come from verification (tasks without inline steps), so any non-empty result is counted.
+    /// Steps stored here come from verification (tasks without inline steps), so any non-empty result is counted,
+    /// except for salvaged tasks, which never had a chance to carry their steps inline.
     /// </summary>
     private void Store(JsonObject task, SubCollection kind, JsonArray items)
     {
-        if (kind == StepsCollection && items.Count > 0)
+        if (kind == StepsCollection && items.Count > 0 && !IsPartial(task))
         {
             StepsFoundByVerification++;
         }
@@ -823,9 +985,18 @@ public sealed class GraphTodoReader
         task[kind.Segment] = items;
     }
 
-    private sealed record BatchRoundOutcome(List<JsonObject> Throttled, List<JsonObject> Individual, TimeSpan? RetryAfter);
+    private static bool IsPartial(JsonObject task) =>
+        task[ReadNotes.PartialMarker] is JsonValue v && v.TryGetValue<bool>(out var partial) && partial;
 
-    private static readonly BatchRoundOutcome Stopped = new([], [], null);
+    /// <param name="Retry">Sub-requests to send again: 429/503, 5xx, or no sub-response at all.</param>
+    /// <param name="ServerErrors">The part of <paramref name="Retry"/> that failed with 500, 502 or 504.</param>
+    /// <param name="Answered">Sub-requests Graph answered (2xx, or a 4xx about that task).</param>
+    private sealed record BatchRoundOutcome(
+        List<JsonObject> Retry, HashSet<JsonObject> ServerErrors, List<JsonObject> Individual, TimeSpan? RetryAfter, int Answered);
+
+    private static readonly BatchRoundOutcome Stopped = new([], new(ReferenceEqualityComparer.Instance), [], null, 0);
+
+    private sealed record BatchesOutcome(List<JsonObject> Individual, bool Answered);
 
     /// <summary>
     /// Sends the requests one batch at a time. Throttled sub-requests go back to the front of the queue and are
@@ -833,15 +1004,25 @@ public sealed class GraphTodoReader
     /// batch size drops to <see cref="ReducedBatchSize"/> and returns to <see cref="BatchSize"/> after
     /// <see cref="CleanBatchesToGrow"/> clean batches. Returns the tasks that need individual GETs.
     /// </summary>
-    /// <remarks>Batches are awaited one after another, so at most <see cref="MaxBatchesInFlight"/> (1) is ever in flight.</remarks>
-    private async Task<List<JsonObject>> RunBatchesAsync(
+    /// <remarks>
+    /// Batches are awaited one after another, so at most <see cref="MaxBatchesInFlight"/> (1) is ever in flight.
+    /// A sub-request that is still throttled after <see cref="MaxThrottleRounds"/> rounds (or still fails with 500, 502
+    /// or 504 after <see cref="MaxRetries"/> retries) is recorded as unreadable only when the failure is specific to
+    /// that task: in the latest batch that held it together with other tasks, Graph answered at least one of the others.
+    /// Otherwise it is an outage and the read stops with a checkpoint.
+    /// </remarks>
+    private async Task<BatchesOutcome> RunBatchesAsync(
         ListContext list, SubCollection kind, List<JsonObject> tasks, Action<int> markDone, CancellationToken cancellationToken)
     {
         var individual = new List<JsonObject>();
         var queue = new LinkedList<JsonObject>(tasks);
         var throttleCounts = new Dictionary<JsonObject, int>(ReferenceEqualityComparer.Instance);
+        var serverErrorCounts = new Dictionary<JsonObject, int>(ReferenceEqualityComparer.Instance);
+        // Per failing task: in the latest batch that held it and other tasks, did Graph answer any of the others?
+        var othersAnswered = new Dictionary<JsonObject, bool>(ReferenceEqualityComparer.Instance);
         var size = BatchSize;
         var cleanStreak = 0;
+        var anyAnswered = false;
 
         while (queue.Count > 0)
         {
@@ -862,12 +1043,13 @@ public sealed class GraphTodoReader
             BatchSizesSent.Add(chunk.Length);
             var outcome = await RunBatchAsync(list, kind, chunk, markDone, cancellationToken).ConfigureAwait(false);
             individual.AddRange(outcome.Individual);
+            anyAnswered |= outcome.Answered > 0;
             if (kind == AttachmentsCollection && _attachmentsDenied)
             {
                 break; // Graph refused attachments; the caller leaves the remaining arrays empty
             }
 
-            if (outcome.Throttled.Count == 0)
+            if (outcome.Retry.Count == 0)
             {
                 cleanStreak++;
                 if (size < BatchSize && cleanStreak >= CleanBatchesToGrow)
@@ -882,21 +1064,39 @@ public sealed class GraphTodoReader
             cleanStreak = 0;
             var round = 0;
             var retry = new List<JsonObject>();
-            foreach (var task in outcome.Throttled)
+            foreach (var task in outcome.Retry)
             {
-                var count = throttleCounts.GetValueOrDefault(task) + 1;
-                throttleCounts[task] = count;
-                round = Math.Max(round, count);
-                if (count >= MaxThrottleRounds)
+                if (outcome.Answered > 0 || chunk.Length > 1)
                 {
-                    task[kind.Segment] = new JsonArray();
-                    AddKindError(list, kind, task, $"Graph kept throttling the {kind.Noun} request after {MaxThrottleRounds} attempts.");
-                    markDone(1);
+                    othersAnswered[task] = outcome.Answered > 0;
                 }
-                else
+
+                var serverError = outcome.ServerErrors.Contains(task);
+                var counts = serverError ? serverErrorCounts : throttleCounts;
+                var count = counts.GetValueOrDefault(task) + 1;
+                counts[task] = count;
+                round = Math.Max(round, count);
+                var limit = serverError ? MaxRetries + 1 : MaxThrottleRounds;
+                if (count < limit)
                 {
                     retry.Add(task);
+                    continue;
                 }
+
+                var what = serverError
+                    ? $"Graph kept failing the {kind.Noun} request with a server error after {MaxRetries} retries."
+                    : $"Graph kept throttling the {kind.Noun} request after {MaxThrottleRounds} attempts.";
+                if (!othersAnswered.GetValueOrDefault(task))
+                {
+                    throw new GraphRequestException(
+                        $"{what} Other requests were not answered either, so Microsoft Graph is not available (list '{list.Name}'). " +
+                        "The read stopped there; nothing was recorded as unreadable. Try again later.",
+                        isOutage: true);
+                }
+
+                task[kind.Segment] = new JsonArray();
+                AddKindError(list, kind, task, what);
+                markDone(1);
             }
 
             // Throttled items go first, in their original order, so they are retried in the next batch.
@@ -911,7 +1111,7 @@ public sealed class GraphTodoReader
             }
         }
 
-        return individual;
+        return new BatchesOutcome(individual, anyAnswered);
     }
 
     /// <summary>Sizes of the batches sent in the last run (steps and attachments), in order. For tests and diagnostics.</summary>
@@ -942,7 +1142,7 @@ public sealed class GraphTodoReader
         {
             // $batch is not available: use individual GETs for the rest of the run.
             _batchUnavailable = true;
-            return new BatchRoundOutcome([], chunk.ToList(), null);
+            return new BatchRoundOutcome([], new(ReferenceEqualityComparer.Instance), chunk.ToList(), null, 0);
         }
         catch (GraphRequestException ex) when (kind == AttachmentsCollection && ex.IsAccessDenied)
         {
@@ -952,12 +1152,14 @@ public sealed class GraphTodoReader
 
         if (response?["responses"] is not JsonArray responses)
         {
-            return new BatchRoundOutcome([], chunk.ToList(), null);
+            return new BatchRoundOutcome([], new(ReferenceEqualityComparer.Instance), chunk.ToList(), null, 0);
         }
 
-        var throttled = new List<JsonObject>();
+        var retry = new List<JsonObject>();
+        var serverErrors = new HashSet<JsonObject>(ReferenceEqualityComparer.Instance);
         var handled = new bool[chunk.Length];
         TimeSpan? retryAfter = null;
+        var answered = 0;
 
         foreach (var sub in responses.OfType<JsonObject>())
         {
@@ -972,9 +1174,15 @@ public sealed class GraphTodoReader
             var status = sub["status"] is JsonValue sv && sv.TryGetValue<int>(out var st) ? st : 0;
             var body = sub["body"] as JsonObject;
 
-            if (status is 429 or 503)
+            if (status is 429 or 503 or 500 or 502 or 504)
             {
-                throttled.Add(task);
+                // Graph does not retry sub-requests itself, so a passing 500, 502 or 504 is retried here like a throttle.
+                retry.Add(task);
+                if (status is 500 or 502 or 504)
+                {
+                    serverErrors.Add(task);
+                }
+
                 var delay = SubResponseRetryAfter(sub);
                 if (delay is { } d && (retryAfter is null || d > retryAfter))
                 {
@@ -1000,6 +1208,7 @@ public sealed class GraphTodoReader
                 }
             }
 
+            answered++;
             if (status is >= 200 and < 300)
             {
                 if (kind == AttachmentsCollection)
@@ -1023,8 +1232,9 @@ public sealed class GraphTodoReader
                             items.AddRange(more);
                         }
                     }
-                    catch (GraphRequestException ex) when (!ex.IsTokenProblem)
+                    catch (GraphRequestException ex) when (!ex.IsTokenProblem && !ex.IsOutage)
                     {
+                        // The first page of this task's collection was answered, so the failure belongs to this task.
                         AddKindError(list, kind, task, ex.Message);
                     }
                 }
@@ -1059,13 +1269,13 @@ public sealed class GraphTodoReader
         {
             if (!handled[i])
             {
-                throttled.Add(chunk[i]);
+                retry.Add(chunk[i]);
             }
         }
 
         // Keep the batch order so retries are deterministic, whatever order Graph answered in.
-        throttled.Sort((a, b) => Array.IndexOf(chunk, a).CompareTo(Array.IndexOf(chunk, b)));
-        return new BatchRoundOutcome(throttled, [], retryAfter);
+        retry.Sort((a, b) => Array.IndexOf(chunk, a).CompareTo(Array.IndexOf(chunk, b)));
+        return new BatchRoundOutcome(retry, serverErrors, [], retryAfter, answered);
     }
 
     private static TimeSpan? SubResponseRetryAfter(JsonObject sub)
@@ -1115,37 +1325,12 @@ public sealed class GraphTodoReader
         return items;
     }
 
-    /// <summary>
-    /// GET a collection for a single task. Errors other than 401 are recorded through the callbacks and
-    /// give an empty array, so one bad task does not stop the read.
-    /// </summary>
-    private async Task<JsonArray> GetOptionalCollectionAsync(
-        string url, Action onInvalidJson, Action<GraphRequestException> onError, CancellationToken cancellationToken,
-        bool rethrowAccessDenied = false)
-    {
-        try
-        {
-            var items = await GetCollectionAsync(url, cancellationToken).ConfigureAwait(false);
-            if (items is null)
-            {
-                onInvalidJson();
-                return new JsonArray();
-            }
-
-            return ToArray(items);
-        }
-        catch (GraphRequestException ex) when (!ex.IsTokenProblem && !(rethrowAccessDenied && ex.IsAccessDenied))
-        {
-            onError(ex);
-            return new JsonArray();
-        }
-    }
-
     /// <summary>Outcome of reading one page: a parsed page, or the raw invalid body and/or the error.</summary>
     private sealed record PageResult(JsonObject? Page, string? RawBody, GraphRequestException? Error);
 
     /// <summary>
-    /// GET one page without throwing for Graph errors other than 401. A body that is not valid JSON is retried once.
+    /// GET one page without throwing for Graph errors other than 401, access denied and an outage
+    /// (<see cref="GraphRequestException.IsOutage"/>), which are thrown. A body that is not valid JSON is retried once.
     /// When the retry fails with an error status, the raw body of the first attempt is kept.
     /// </summary>
     private async Task<PageResult> TryGetPageAsync(string url, CancellationToken cancellationToken)
@@ -1158,7 +1343,7 @@ public sealed class GraphTodoReader
             {
                 body = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, url), url, cancellationToken).ConfigureAwait(false);
             }
-            catch (GraphRequestException ex) when (!ex.IsTokenProblem && !ex.IsAccessDenied)
+            catch (GraphRequestException ex) when (!ex.IsTokenProblem && !ex.IsAccessDenied && !ex.IsOutage)
             {
                 return new PageResult(null, raw, ex);
             }
@@ -1274,7 +1459,8 @@ public sealed class GraphTodoReader
                     throw new GraphRequestException(
                         $"Microsoft Graph kept throttling the request ({GraphRequestException.Describe(status, lastError.Code, lastError.Message)}) after {MaxThrottleRounds} attempts: {DescribeUrl(url)}. Try again later.",
                         status,
-                        lastError.Code);
+                        lastError.Code,
+                        isOutage: true);
                 }
 
                 await WaitForThrottleAsync(ThrottleDelay(retryAfter, throttles), cancellationToken).ConfigureAwait(false);
@@ -1291,7 +1477,8 @@ public sealed class GraphTodoReader
                     $"Microsoft Graph request kept failing with {reason} after {MaxRetries} retries: {DescribeUrl(url)}. Try again later.",
                     status,
                     failure is null ? lastError.Code : null,
-                    inner: failure);
+                    inner: failure,
+                    isOutage: failure is not null || status is HttpStatusCode.BadGateway or HttpStatusCode.GatewayTimeout);
             }
 
             await _delay(Clamp(Backoff(failures)), cancellationToken).ConfigureAwait(false);
@@ -1416,14 +1603,6 @@ public sealed class GraphTodoReader
     }
 
     // ------------------------------------------------------------------ helpers
-
-    private int ErrorCount()
-    {
-        lock (_errorsLock)
-        {
-            return _errors.Count;
-        }
-    }
 
     /// <summary>Adds a read error, unless one of the same kind is already recorded for the same list and position or task.</summary>
     private void AddError(ReadError error)

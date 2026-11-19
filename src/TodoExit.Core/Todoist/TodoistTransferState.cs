@@ -34,6 +34,15 @@ public sealed class TodoistTransferState
     /// <summary>The settings the plan was built with. A resume uses these, not the command line.</summary>
     public TodoistPlanSettings Settings { get; init; } = new();
 
+    /// <summary>
+    /// Todoist user id of the account this transfer writes to. Every run checks the token's account against it before
+    /// it writes. Null in a state saved by an earlier version, or before the first run of an offline plan.
+    /// </summary>
+    public string? TodoistUserId { get; set; }
+
+    /// <summary>Email of that account, for messages. Not used to decide anything.</summary>
+    public string? TodoistEmail { get; set; }
+
     /// <summary>Projects that existed in the account before this transfer started. Never touched.</summary>
     public HashSet<string> PreexistingProjectIds { get; init; } = new(StringComparer.Ordinal);
 
@@ -97,6 +106,8 @@ public sealed class TodoistTransferState
             ["archiveFingerprint"] = ArchiveFingerprint,
             ["startedAt"] = StartedAt.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
             ["settings"] = Settings.ToJson(),
+            ["todoistUserId"] = TodoistUserId,
+            ["todoistEmail"] = TodoistEmail,
             ["finished"] = Finished,
             ["remindersRefused"] = RemindersRefused,
             ["preexistingProjectIds"] = Array(PreexistingProjectIds.Order(StringComparer.Ordinal)),
@@ -176,6 +187,8 @@ public sealed class TodoistTransferState
                 ? s
                 : DateTimeOffset.MinValue,
             Settings = TodoistPlanSettings.FromJson(root["settings"] as JsonObject),
+            TodoistUserId = Str(root, "todoistUserId") is { Length: > 0 } userId ? userId : null,
+            TodoistEmail = Str(root, "todoistEmail"),
             Finished = root["finished"] is JsonValue f && f.TryGetValue<bool>(out var fin) && fin,
             RemindersRefused = root["remindersRefused"] is JsonValue r && r.TryGetValue<bool>(out var rr) && rr,
             PreexistingProjectIds = Set(root["preexistingProjectIds"]),

@@ -52,6 +52,8 @@ todo-exit export    [--token <t> | --token-file <path> | --from-archive <file>] 
 
 If the sign-in can no longer be renewed, a token you passed expires, Graph fails for another reason, or you press Ctrl+C, todo-exit saves everything it has read so far to `archive.partial.json` in the `--out` folder (the current folder for `inventory` without `--out`) and exits with code 3. Run the same command with `--resume archive.partial.json`; it asks you to sign in again (or takes a new token). The tool continues where it stopped and does not read finished work again. When it is done, you can delete `archive.partial.json`.
 
+A network failure, throttling or an outage at Microsoft stops the read the same way. The tool never marks a list as finished, or a task as unreadable, because the service did not answer.
+
 A partial archive also works with `--from-archive`. The report then starts with a note that the archive is incomplete and names the list that was in progress.
 
 ## Large accounts
@@ -84,6 +86,7 @@ What it does:
 
 - One Todoist project per To Do list. Open steps become sub-tasks. Priority, labels, notes, due dates and repeat rules are carried as in the CSV.
 - It never adds to, changes or deletes anything that already exists in your account. If a project with the same name exists, it stops before writing.
+- A transfer belongs to the Todoist account its plan was made for. If you continue it with the token of another account, it stops and writes nothing.
 - A list with more tasks than one project allows is split into `part` projects. If your plan has too few free projects, it tells you what fits, and you choose lists with `--lists "Work,Home"`.
 - `--include-completed` also transfers completed tasks and checked steps, completed in Todoist with their original date. On a large account this takes long: about 15 seconds per 100 items.
 - Reminders are added when your Todoist plan has reminders. Otherwise the report lists them.
