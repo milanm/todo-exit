@@ -1,0 +1,908 @@
+{
+  "format": "todo-exit-archive",
+  "version": 1,
+  "exportedAt": "2026-11-19T13:30:00Z",
+  "lists": [
+    {
+      "list": {
+        "@odata.etag": "W/\"list\"",
+        "displayName": "Tasks",
+        "isOwner": true,
+        "isShared": false,
+        "wellknownListName": "defaultList",
+        "id": "AAMkSampleList1"
+      },
+      "tasks": [
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "high",
+          "isReminderOn": true,
+          "status": "notStarted",
+          "title": "Renew passport",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [
+            "Errands"
+          ],
+          "id": "AAMkSampleTask001",
+          "body": {
+            "content": "Bring two photos and the old passport.\nOffice opens at 8.",
+            "contentType": "text"
+          },
+          "dueDateTime": {
+            "dateTime": "2026-11-24T23:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "reminderDateTime": {
+            "dateTime": "2026-11-25T08:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "notStarted",
+          "title": "Pay electricity bill",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [
+            "Bills"
+          ],
+          "id": "AAMkSampleTask002",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "dueDateTime": {
+            "dateTime": "2026-11-30T23:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "recurrence": {
+            "pattern": {
+              "type": "absoluteMonthly",
+              "interval": 1,
+              "month": 0,
+              "dayOfMonth": 1,
+              "daysOfWeek": [],
+              "firstDayOfWeek": "monday",
+              "index": "first"
+            },
+            "range": {
+              "type": "noEnd",
+              "startDate": "2026-12-01",
+              "endDate": "0001-01-01",
+              "recurrenceTimeZone": "Central Europe Standard Time",
+              "numberOfOccurrences": 0
+            }
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": true,
+          "status": "notStarted",
+          "title": "Call the dentist",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [],
+          "id": "AAMkSampleTask003",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "reminderDateTime": {
+            "dateTime": "2026-11-20T13:30:00.0000000",
+            "timeZone": "UTC"
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "notStarted",
+          "title": "Back up the laptop",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [],
+          "id": "AAMkSampleTask004",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "dueDateTime": {
+            "dateTime": "2026-11-21T23:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "recurrence": {
+            "pattern": {
+              "type": "weekly",
+              "interval": 1,
+              "month": 0,
+              "dayOfMonth": 0,
+              "daysOfWeek": [
+                "sunday"
+              ],
+              "firstDayOfWeek": "monday",
+              "index": "first"
+            },
+            "range": {
+              "type": "noEnd",
+              "startDate": "2026-11-22",
+              "endDate": "0001-01-01",
+              "recurrenceTimeZone": "Central Europe Standard Time",
+              "numberOfOccurrences": 0
+            }
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "notStarted",
+          "title": "Read chapter 4 of the design book",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [],
+          "id": "AAMkSampleTask005",
+          "body": {
+            "content": "<div><p>Focus on the part about <b>coupling</b>.</p><ul><li>Take notes</li><li>Write a summary &amp; share it</li></ul><p>Page&nbsp;112 onward.</p></div>",
+            "contentType": "html"
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "completed",
+          "title": "Order new running shoes",
+          "createdDateTime": "2026-10-20T10:00:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [],
+          "id": "AAMkSampleTask006",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "completedDateTime": {
+            "dateTime": "2026-11-01T00:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "notStarted",
+          "title": "Water the plants",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [],
+          "id": "AAMkSampleTask007",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "dueDateTime": {
+            "dateTime": "2026-11-18T23:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "recurrence": {
+            "pattern": {
+              "type": "daily",
+              "interval": 3,
+              "month": 0,
+              "dayOfMonth": 0,
+              "daysOfWeek": [],
+              "firstDayOfWeek": "monday",
+              "index": "first"
+            },
+            "range": {
+              "type": "noEnd",
+              "startDate": "2026-11-19",
+              "endDate": "0001-01-01",
+              "recurrenceTimeZone": "Central Europe Standard Time",
+              "numberOfOccurrences": 0
+            }
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        }
+      ]
+    },
+    {
+      "list": {
+        "@odata.etag": "W/\"list\"",
+        "displayName": "Home",
+        "isOwner": true,
+        "isShared": false,
+        "wellknownListName": "none",
+        "id": "AAMkSampleList2"
+      },
+      "tasks": [
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "notStarted",
+          "title": "Fix the kitchen tap",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [
+            "Repairs"
+          ],
+          "id": "AAMkSampleTask008",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "linkedResources": [],
+          "checklistItems": [
+            {
+              "displayName": "Buy a washer",
+              "isChecked": true,
+              "createdDateTime": "2026-10-02T07:16:00.0000000Z",
+              "id": "step-AAMkSampleTask008-0"
+            },
+            {
+              "displayName": "Turn off the water",
+              "isChecked": false,
+              "createdDateTime": "2026-10-02T07:16:00.0000000Z",
+              "id": "step-AAMkSampleTask008-1"
+            },
+            {
+              "displayName": "Replace the washer",
+              "isChecked": false,
+              "createdDateTime": "2026-10-02T07:16:00.0000000Z",
+              "id": "step-AAMkSampleTask008-2"
+            }
+          ],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "notStarted",
+          "title": "Clean the gutters",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [],
+          "id": "AAMkSampleTask009",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "dueDateTime": {
+            "dateTime": "2027-03-31T22:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "startDateTime": {
+            "dateTime": "2027-03-14T23:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "recurrence": {
+            "pattern": {
+              "type": "absoluteYearly",
+              "interval": 1,
+              "month": 4,
+              "dayOfMonth": 1,
+              "daysOfWeek": [],
+              "firstDayOfWeek": "monday",
+              "index": "first"
+            },
+            "range": {
+              "type": "noEnd",
+              "startDate": "2027-04-01",
+              "endDate": "0001-01-01",
+              "recurrenceTimeZone": "Central Europe Standard Time",
+              "numberOfOccurrences": 0
+            }
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "notStarted",
+          "title": "Take out recycling",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [],
+          "id": "AAMkSampleTask010",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "dueDateTime": {
+            "dateTime": "2026-11-22T23:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "recurrence": {
+            "pattern": {
+              "type": "weekly",
+              "interval": 1,
+              "month": 0,
+              "dayOfMonth": 0,
+              "daysOfWeek": [
+                "monday",
+                "thursday"
+              ],
+              "firstDayOfWeek": "monday",
+              "index": "first"
+            },
+            "range": {
+              "type": "noEnd",
+              "startDate": "2026-11-23",
+              "endDate": "0001-01-01",
+              "recurrenceTimeZone": "Central Europe Standard Time",
+              "numberOfOccurrences": 0
+            }
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "notStarted",
+          "title": "Change smoke alarm batteries",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [],
+          "id": "AAMkSampleTask011",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "dueDateTime": {
+            "dateTime": "2027-10-30T23:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "recurrence": {
+            "pattern": {
+              "type": "relativeYearly",
+              "interval": 1,
+              "month": 10,
+              "dayOfMonth": 0,
+              "daysOfWeek": [
+                "sunday"
+              ],
+              "firstDayOfWeek": "monday",
+              "index": "last"
+            },
+            "range": {
+              "type": "noEnd",
+              "startDate": "2027-10-31",
+              "endDate": "0001-01-01",
+              "recurrenceTimeZone": "Central Europe Standard Time",
+              "numberOfOccurrences": 0
+            }
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "low",
+          "isReminderOn": false,
+          "status": "notStarted",
+          "title": "Book chimney inspection",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [],
+          "id": "AAMkSampleTask012",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "completed",
+          "title": "Sort the winter clothes",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [],
+          "id": "AAMkSampleTask013",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "completedDateTime": {
+            "dateTime": "2026-10-28T00:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "linkedResources": [],
+          "checklistItems": [
+            {
+              "displayName": "Jackets",
+              "isChecked": true,
+              "createdDateTime": "2026-10-02T07:16:00.0000000Z",
+              "id": "step-AAMkSampleTask013-0"
+            },
+            {
+              "displayName": "Boots",
+              "isChecked": true,
+              "createdDateTime": "2026-10-02T07:16:00.0000000Z",
+              "id": "step-AAMkSampleTask013-1"
+            }
+          ],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "notStarted",
+          "title": "Plan the garden layout",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": true,
+          "categories": [],
+          "id": "AAMkSampleTask014",
+          "body": {
+            "content": "Sketch attached. Check the sunny corner first.",
+            "contentType": "text"
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": [
+            {
+              "@odata.type": "#microsoft.graph.taskFileAttachment",
+              "id": "att-1",
+              "name": "garden-sketch.png",
+              "size": 248113,
+              "contentType": "image/png",
+              "lastModifiedDateTime": "2026-11-05T18:20:00Z"
+            }
+          ]
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "notStarted",
+          "title": "Morning stretch",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [],
+          "id": "AAMkSampleTask015",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "dueDateTime": {
+            "dateTime": "2026-11-19T23:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "recurrence": {
+            "pattern": {
+              "type": "weekly",
+              "interval": 1,
+              "month": 0,
+              "dayOfMonth": 0,
+              "daysOfWeek": [
+                "monday",
+                "tuesday",
+                "wednesday",
+                "thursday",
+                "friday"
+              ],
+              "firstDayOfWeek": "monday",
+              "index": "first"
+            },
+            "range": {
+              "type": "noEnd",
+              "startDate": "2026-11-20",
+              "endDate": "0001-01-01",
+              "recurrenceTimeZone": "Central Europe Standard Time",
+              "numberOfOccurrences": 0
+            }
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        }
+      ]
+    },
+    {
+      "list": {
+        "@odata.etag": "W/\"list\"",
+        "displayName": "Work projects",
+        "isOwner": true,
+        "isShared": false,
+        "wellknownListName": "none",
+        "id": "AAMkSampleList3"
+      },
+      "tasks": [
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "high",
+          "isReminderOn": true,
+          "status": "notStarted",
+          "title": "Prepare quarterly review slides",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [
+            "Q4 review",
+            "Slides"
+          ],
+          "id": "AAMkSampleTask016",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "dueDateTime": {
+            "dateTime": "2026-12-09T23:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "reminderDateTime": {
+            "dateTime": "2026-12-09T08:30:00.0000000",
+            "timeZone": "UTC"
+          },
+          "linkedResources": [],
+          "checklistItems": [
+            {
+              "displayName": "Collect metrics",
+              "isChecked": false,
+              "createdDateTime": "2026-10-02T07:16:00.0000000Z",
+              "id": "step-AAMkSampleTask016-0"
+            },
+            {
+              "displayName": "Draft outline",
+              "isChecked": false,
+              "createdDateTime": "2026-10-02T07:16:00.0000000Z",
+              "id": "step-AAMkSampleTask016-1"
+            },
+            {
+              "displayName": "Review with team, \"final\" pass",
+              "isChecked": false,
+              "createdDateTime": "2026-10-02T07:16:00.0000000Z",
+              "id": "step-AAMkSampleTask016-2"
+            }
+          ],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "notStarted",
+          "title": "Follow up on the vendor email",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [],
+          "id": "AAMkSampleTask017",
+          "body": {
+            "content": "Ask about the delivery date, the price, and support terms.",
+            "contentType": "text"
+          },
+          "linkedResources": [
+            {
+              "webUrl": "https://outlook.live.com/mail/0/inbox/id/SAMPLE",
+              "applicationName": "Outlook",
+              "displayName": "Vendor contract, draft 2",
+              "externalId": "SAMPLE",
+              "id": "link-1"
+            }
+          ],
+          "checklistItems": [],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "notStarted",
+          "title": "Team retrospective",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [],
+          "id": "AAMkSampleTask018",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "dueDateTime": {
+            "dateTime": "2026-11-26T23:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "recurrence": {
+            "pattern": {
+              "type": "weekly",
+              "interval": 2,
+              "month": 0,
+              "dayOfMonth": 0,
+              "daysOfWeek": [
+                "friday"
+              ],
+              "firstDayOfWeek": "monday",
+              "index": "first"
+            },
+            "range": {
+              "type": "noEnd",
+              "startDate": "2026-11-27",
+              "endDate": "0001-01-01",
+              "recurrenceTimeZone": "Central Europe Standard Time",
+              "numberOfOccurrences": 0
+            }
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "notStarted",
+          "title": "1:1 meetings",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [],
+          "id": "AAMkSampleTask019",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "dueDateTime": {
+            "dateTime": "2026-11-23T23:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "recurrence": {
+            "pattern": {
+              "type": "weekly",
+              "interval": 2,
+              "month": 0,
+              "dayOfMonth": 0,
+              "daysOfWeek": [
+                "tuesday",
+                "thursday"
+              ],
+              "firstDayOfWeek": "monday",
+              "index": "first"
+            },
+            "range": {
+              "type": "noEnd",
+              "startDate": "2026-11-24",
+              "endDate": "0001-01-01",
+              "recurrenceTimeZone": "Central Europe Standard Time",
+              "numberOfOccurrences": 0
+            }
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "notStarted",
+          "title": "Monthly planning",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [],
+          "id": "AAMkSampleTask020",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "dueDateTime": {
+            "dateTime": "2026-12-07T23:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "recurrence": {
+            "pattern": {
+              "type": "relativeMonthly",
+              "interval": 1,
+              "month": 0,
+              "dayOfMonth": 0,
+              "daysOfWeek": [
+                "tuesday"
+              ],
+              "firstDayOfWeek": "monday",
+              "index": "second"
+            },
+            "range": {
+              "type": "noEnd",
+              "startDate": "2026-12-08",
+              "endDate": "0001-01-01",
+              "recurrenceTimeZone": "Central Europe Standard Time",
+              "numberOfOccurrences": 0
+            }
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "inProgress",
+          "title": "Update the onboarding guide",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [],
+          "id": "AAMkSampleTask021",
+          "body": {
+            "content": "Sections 2 and 5 are out of date.",
+            "contentType": "text"
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "completed",
+          "title": "Submit expense report",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [
+            "Admin"
+          ],
+          "id": "AAMkSampleTask022",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "completedDateTime": {
+            "dateTime": "2026-11-12T00:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        }
+      ]
+    },
+    {
+      "list": {
+        "@odata.etag": "W/\"list\"",
+        "displayName": "Groceries",
+        "isOwner": true,
+        "isShared": true,
+        "wellknownListName": "none",
+        "id": "AAMkSampleList4"
+      },
+      "tasks": [
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "notStarted",
+          "title": "Milk",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [],
+          "id": "AAMkSampleTask023",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "notStarted",
+          "title": "Bread",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [],
+          "id": "AAMkSampleTask024",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "high",
+          "isReminderOn": false,
+          "status": "notStarted",
+          "title": "Coffee beans",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [],
+          "id": "AAMkSampleTask025",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        },
+        {
+          "@odata.etag": "W/\"sample\"",
+          "importance": "normal",
+          "isReminderOn": false,
+          "status": "completed",
+          "title": "Olive oil",
+          "createdDateTime": "2026-10-02T07:15:00.0000000Z",
+          "lastModifiedDateTime": "2026-11-10T09:00:00.0000000Z",
+          "hasAttachments": false,
+          "categories": [],
+          "id": "AAMkSampleTask026",
+          "body": {
+            "content": "",
+            "contentType": "text"
+          },
+          "completedDateTime": {
+            "dateTime": "2026-11-15T00:00:00.0000000",
+            "timeZone": "UTC"
+          },
+          "linkedResources": [],
+          "checklistItems": [],
+          "attachments": []
+        }
+      ]
+    }
+  ]
+}

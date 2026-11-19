@@ -1,0 +1,378 @@
+﻿@page "/"
+@using System.IO.Compression
+@using Microsoft.AspNetCore.Components.Authorization
+@using TodoExit.Core
+@using TodoExit.Core.Archive
+@using TodoExit.Core.Export
+@using TodoExit.Core.Graph
+@using TodoExit.Core.Model
+@implements IDisposable
+@inject AppSettings Settings
+@inject HttpClient AppHttp
+@inject IHttpClientFactory HttpFactory
+@inject NavigationManager Navigation
+@inject IJSRuntime JS
+@inject AuthenticationStateProvider AuthState
+
+<PageTitle>todo-exit: export Microsoft To Do</PageTitle>
+
+<section class="section intro">
+    <h1>Export your Microsoft To Do tasks</h1>
+    <p>
+        Microsoft retires the Microsoft To Do apps on June 30, 2027. Personal accounts get no replacement,
+        and your tasks do not move anywhere by themselves.
+    </p>
+    <p>
+        This page reads your lists and tasks and saves them as files you keep: a complete JSON archive,
+        Markdown files, CSV files that Todoist can import, and one CSV file for spreadsheets.
+        It also tells you what each format could not carry over.
+    </p>
+</section>
+
+<section class="section">
+    <h2>Privacy</h2>
+    <ul class="plain">
+        <li>The app asks Microsoft for read-only access to your tasks (the Tasks.Read permission). It cannot change or delete anything.</li>
+        <li>It runs entirely in your browser. There is no todo-exit server.</li>
+        <li>Your browser talks only to Microsoft Graph to read your tasks. Nothing is sent to any other server.</li>
+        <li>The files are built on your device and saved by your browser.</li>
+        <li>The source code is open: <a href="@AppSettings.RepositoryUrl">@AppSettings.RepositoryUrl</a>.</li>
+    </ul>
+</section>
+
+<section class="section">
+    <h2>1. Read your tasks</h2>
+
+    @if (!Settings.SignInConfigured)
+    {
+        <p class="notice">Sign-in is not configured in this build, so only the sample data is available. See docs/entra-app-registration.md in the repository to set it up.</p>
+    }
+    else if (_userName is not null)
+    {
+        <p>Signed in as <strong>@_userName</strong>. <button type="button" class="link-button" @onclick="SignOut">Sign out</button></p>
+    }
+
+    <div class="actions">
+        @if (Settings.SignInConfigured)
+        {
+            @if (_userName is null)
+            {
+                <button type="button" class="button" disabled="@Busy" @onclick="SignIn">Sign in with Microsoft</button>
+            }
+            else
+            {
+                <button type="button" class="button" disabled="@Busy" @onclick="ReadFromGraphAsync">Read my tasks again</button>
+            }
+        }
+        <button type="button" class="button secondary" disabled="@Busy" @onclick="LoadSampleAsync">Try with sample data</button>
+    </div>
+
+    @if (_state == State.Reading)
+    {
+        <p class="status" role="status">
+            @if (_progress is { } p && p.ListsTotal > 0)
+            {
+                <span>Reading list @(Math.Min(p.ListsDone + 1, p.ListsTotal)) of @p.ListsTotal@(p.CurrentList is null ? "" : $" ({p.CurrentList})"). Tasks read so far: @p.TasksRead.</span>
+            }
+            else
+            {
+                <span>Reading your lists...</span>
+            }
+        </p>
+        <button type="button" class="link-button" @onclick="Cancel">Cancel</button>
+    }
+
+    @if (_error is not null)
+    {
+        <p class="error" role="alert">@_error</p>
+    }
+</section>
+
+@if (_archive is not null && _inventory is not null)
+{
+    <section class="section">
+        <h2>2. What was found</h2>
+        <p>@_source</p>
+
+        <table class="table counts">
+            <tbody>
+                @foreach (var (label, value) in _inventory.Totals.Rows())
+                {
+                    <tr><th scope="row">@label</th><td>@value</td></tr>
+                }
+            </tbody>
+        </table>
+
+        <div class="table-scroll">
+            <table class="table">
+                <thead>
+                    <tr><th scope="col">List</th><th scope="col">Tasks</th><th scope="col">Open</th><th scope="col">Completed</th><th scope="col">Recurring</th><th scope="col">Shared</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var list in _inventory.PerList)
+                    {
+                        <tr>
+                            <td>@list.ListName</td>
+                            <td>@list.Counts.Tasks</td>
+                            <td>@list.Counts.Open</td>
+                            <td>@list.Counts.Completed</td>
+                            <td>@list.Counts.Recurring</td>
+                            <td>@(list.Counts.SharedLists > 0 ? "yes" : "no")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="section">
+        <h2>3. Choose formats</h2>
+        <fieldset class="options">
+            <legend class="visually-hidden">Formats</legend>
+            <label><input type="checkbox" @bind="_json" @bind:after="Recalculate" /> JSON archive (archive.json). Keeps everything.</label>
+            <label><input type="checkbox" @bind="_markdown" @bind:after="Recalculate" /> Markdown, one file per list</label>
+            <label><input type="checkbox" @bind="_todoist" @bind:after="Recalculate" /> Todoist CSV, one file per list (up to 300 tasks per file)</label>
+            <label><input type="checkbox" @bind="_csv" @bind:after="Recalculate" /> Generic CSV for spreadsheets (tasks.csv)</label>
+            <label class="sub-option"><input type="checkbox" @bind="_includeCompleted" @bind:after="Recalculate" /> Include completed tasks in the Todoist CSV. They will import as open tasks.</label>
+        </fieldset>
+    </section>
+
+    <section class="section">
+        <h2>4. Download</h2>
+        <div class="actions">
+            <button type="button" class="button" @onclick="DownloadArchiveAsync">Download archive.json</button>
+            <button type="button" class="button secondary" disabled="@(SelectedFormats == ExportFormats.None)" @onclick="DownloadZipAsync">Download selected formats (.zip)</button>
+        </div>
+        <p class="hint">The zip file also contains report.md and report.json, which list everything below.</p>
+    </section>
+
+    <section class="section">
+        <h2>What will not carry over</h2>
+        @if (_report is null || SelectedFormats == ExportFormats.None)
+        {
+            <p>Select at least one format.</p>
+        }
+        else
+        {
+            @if (SelectedFormats.HasFlag(ExportFormats.Json))
+            {
+                <p>The JSON archive keeps everything Microsoft Graph returned, so it has no losses.</p>
+            }
+
+            @foreach (var group in _report.Losses.GroupBy(l => l.Format))
+            {
+                <h3>@FormatTitle(group.Key)</h3>
+                <table class="table counts">
+                    <tbody>
+                        @foreach (var kind in group.GroupBy(l => l.Kind).OrderByDescending(k => k.Count()))
+                        {
+                            <tr><th scope="row">@KindText(kind.Key)</th><td>@kind.Count()</td></tr>
+                        }
+                    </tbody>
+                </table>
+                <details>
+                    <summary>Show each item</summary>
+                    <ul class="loss-list">
+                        @foreach (var loss in group)
+                        {
+                            <li><span class="loss-where">@loss.List@(loss.Task is null ? "" : $" / {loss.Task}")</span> @loss.Message</li>
+                        }
+                    </ul>
+                </details>
+            }
+
+            @if (!_report.Losses.Any() && SelectedFormats != ExportFormats.Json)
+            {
+                <p>Nothing is lost in the selected formats.</p>
+            }
+        }
+    </section>
+}
+
+@code {
+    private enum State { Idle, Reading, Ready }
+
+    private State _state = State.Idle;
+    private ReadProgress? _progress;
+    private string? _error;
+    private string? _userName;
+    private string? _source;
+    private CancellationTokenSource? _cts;
+
+    private TodoArchiveDocument? _document;
+    private TodoArchive? _archive;
+    private Inventory? _inventory;
+    private LossReport? _report;
+
+    private bool _json = true;
+    private bool _markdown = true;
+    private bool _todoist = true;
+    private bool _csv = true;
+    private bool _includeCompleted;
+
+    private bool Busy => _state == State.Reading;
+
+    private ExportFormats SelectedFormats =>
+        (_json ? ExportFormats.Json : 0) | (_markdown ? ExportFormats.Markdown : 0)
+        | (_todoist ? ExportFormats.Todoist : 0) | (_csv ? ExportFormats.Csv : 0);
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!Settings.SignInConfigured)
+        {
+            return;
+        }
+
+        try
+        {
+            var state = await AuthState.GetAuthenticationStateAsync();
+            if (state.User.Identity?.IsAuthenticated == true)
+            {
+                _userName = state.User.FindFirst("preferred_username")?.Value ?? state.User.Identity.Name ?? "your Microsoft account";
+                await ReadFromGraphAsync();
+            }
+        }
+        catch (Exception ex) when (ex is JSException or InvalidOperationException)
+        {
+            _error = "Sign-in could not start: " + ex.Message;
+        }
+    }
+
+    private void SignIn() => Navigation.NavigateToLogin("authentication/login");
+
+    private void SignOut() => Navigation.NavigateToLogout("authentication/logout");
+
+    private void Cancel() => _cts?.Cancel();
+
+    private async Task ReadFromGraphAsync()
+    {
+        _error = null;
+        _state = State.Reading;
+        _progress = null;
+        _cts?.Dispose();
+        _cts = new CancellationTokenSource();
+        StateHasChanged();
+
+        try
+        {
+            var http = HttpFactory.CreateClient(AppSettings.GraphClientName);
+            var reader = new GraphTodoReader(http);
+            var progress = new Progress<ReadProgress>(p =>
+            {
+                _progress = p;
+                StateHasChanged();
+            });
+            var document = await reader.ReadAsync(progress, _cts.Token);
+            SetArchive(document, "Read from your Microsoft account just now.");
+        }
+        catch (AccessTokenNotAvailableException ex)
+        {
+            ex.Redirect();
+        }
+        catch (OperationCanceledException)
+        {
+            _state = _archive is null ? State.Idle : State.Ready;
+            _error = "Reading was cancelled.";
+        }
+        catch (Exception ex) when (ex is GraphRequestException or HttpRequestException)
+        {
+            _state = _archive is null ? State.Idle : State.Ready;
+            _error = ex.Message;
+        }
+    }
+
+    private async Task LoadSampleAsync()
+    {
+        _error = null;
+        try
+        {
+            var bytes = await AppHttp.GetByteArrayAsync("sample/sample-archive.json");
+            SetArchive(TodoArchiveDocument.Parse(bytes), "Showing sample data for a fictional account. None of it is yours.");
+        }
+        catch (Exception ex) when (ex is HttpRequestException or InvalidDataException)
+        {
+            _error = "The sample data could not be loaded: " + ex.Message;
+        }
+    }
+
+    private void SetArchive(TodoArchiveDocument document, string source)
+    {
+        _document = document;
+        _archive = ArchiveParser.Parse(document, TimeZoneInfo.Local);
+        _inventory = Inventory.From(_archive);
+        _source = source;
+        _state = State.Ready;
+        Recalculate();
+    }
+
+    private void Recalculate()
+    {
+        if (_document is null || _archive is null || SelectedFormats == ExportFormats.None)
+        {
+            _report = null;
+            return;
+        }
+
+        _report = ExportService.Export(_document, _archive, new ExportOptions(SelectedFormats, _includeCompleted)).Report;
+    }
+
+    private async Task DownloadArchiveAsync()
+    {
+        if (_document is null)
+        {
+            return;
+        }
+
+        await JS.InvokeVoidAsync("todoExit.download", ExportService.ArchiveFileName, "application/json", _document.ToUtf8Bytes());
+    }
+
+    private async Task DownloadZipAsync()
+    {
+        if (_document is null || _archive is null || SelectedFormats == ExportFormats.None)
+        {
+            return;
+        }
+
+        var result = ExportService.Export(_document, _archive, new ExportOptions(SelectedFormats, _includeCompleted));
+        using var buffer = new MemoryStream();
+        using (var zip = new ZipArchive(buffer, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach (var file in result.Files)
+            {
+                var entry = zip.CreateEntry(file.Path, CompressionLevel.Optimal);
+                await using var stream = entry.Open();
+                await stream.WriteAsync(file.Content);
+            }
+        }
+
+        var name = $"todo-exit-{DateTime.Now:yyyy-MM-dd}.zip";
+        await JS.InvokeVoidAsync("todoExit.download", name, "application/zip", buffer.ToArray());
+    }
+
+    private static string FormatTitle(string format) => format switch
+    {
+        ExportFormatNames.Todoist => "Todoist CSV",
+        ExportFormatNames.Markdown => "Markdown",
+        ExportFormatNames.Csv => "Generic CSV",
+        _ => format,
+    };
+
+    private static string KindText(string kind) => kind switch
+    {
+        LossKinds.CompletedSkipped => "Completed tasks skipped",
+        LossKinds.CheckedStepSkipped => "Checked steps skipped",
+        LossKinds.ReminderNotCarried => "Reminders not carried",
+        LossKinds.AttachmentNotCarried => "Tasks with attachments (files not included)",
+        LossKinds.RecurrenceApproximated => "Repeat rules approximated",
+        LossKinds.SharedListMembersNotCarried => "Shared lists (members not carried)",
+        LossKinds.StartDateNotCarried => "Start dates not carried",
+        LossKinds.StepOverflow => "Steps cut because of the 300-task limit",
+        _ => kind,
+    };
+
+    public void Dispose()
+    {
+        _cts?.Cancel();
+        _cts?.Dispose();
+    }
+}

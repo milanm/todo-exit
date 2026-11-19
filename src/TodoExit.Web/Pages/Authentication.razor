@@ -1,0 +1,17 @@
+@page "/authentication/{action}"
+
+<PageTitle>Signing in - todo-exit</PageTitle>
+
+<section class="section">
+    <RemoteAuthenticatorView Action="@Action">
+        <LoggingIn><p>Signing in with Microsoft...</p></LoggingIn>
+        <CompletingLoggingIn><p>Finishing sign-in...</p></CompletingLoggingIn>
+        <LogInFailed><p>Sign-in did not complete. <a href="">Go back</a> and try again.</p></LogInFailed>
+        <LogOut><p>Signing out...</p></LogOut>
+        <LogOutSucceeded><p>You are signed out. <a href="">Go back to the start</a>.</p></LogOutSucceeded>
+    </RemoteAuthenticatorView>
+</section>
+
+@code {
+    [Parameter] public string? Action { get; set; }
+}

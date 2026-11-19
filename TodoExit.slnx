@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TodoExit.Cli/TodoExit.Cli.csproj" />
+    <Project Path="src/TodoExit.Core/TodoExit.Core.csproj" />
+    <Project Path="src/TodoExit.Web/TodoExit.Web.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TodoExit.Core.Tests/TodoExit.Core.Tests.csproj" />
+  </Folder>
+</Solution>
