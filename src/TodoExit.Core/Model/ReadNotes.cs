@@ -34,7 +34,7 @@ public sealed record ReadNotes(bool StepsForCompletedTasksSkipped, IReadOnlyList
 {
     public const string PropertyName = "readNotes";
 
-    /// <summary>Marks a task object in the archive that was salvaged with $select and is incomplete.</summary>
+    /// <summary>Marks a task object in the archive that was salvaged from a broken Graph response and is incomplete.</summary>
     public const string PartialMarker = "todoExitPartial";
 
     public static ReadNotes Empty { get; } = new(false, []);

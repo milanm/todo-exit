@@ -43,14 +43,14 @@ The report lists each loss by format, list and task, so you can fix the importan
 
 ### When Microsoft Graph cannot return something
 
-Sometimes Graph itself cannot return a task. On one real account, a single corrupt task made every page that contained it come back broken. todo-exit then narrows the page down until only that task is left, reads every other task, and tries to save at least the id and title of the broken one. Such a task is kept in the archive with `"todoExitPartial": true`. If even that fails, the task is skipped.
+Sometimes Graph itself cannot return a task. On one real account, a single corrupt task made every page that contained it come back broken: Graph sent most of the task, failed partway through, and stopped. todo-exit then narrows the page down until only that task is left and reads every other task normally. For the broken task it keeps every property Graph managed to send before it failed, marks the task with `"todoExitPartial": true`, and still reads its steps. The report names the property Graph failed on and the error Graph gave. If Graph failed before sending the task's id, the task is skipped and the report gives its position in the list.
 
 All of this is recorded in a "Could not be read from Microsoft Graph" section at the top of `report.md`, and in `readErrors` in `report.json`. It applies to every format, including the JSON archive. The kinds are:
 
 | Kind | Meaning |
 |---|---|
 | `task-unreadable` | The task could not be read at all and is missing. The report gives its position in the list. |
-| `task-partial` | Only some properties of the task could be read. It is exported with what there is. |
+| `task-partial` | Graph failed partway through the task. It is kept with the properties Graph sent, and the report names the property that failed. |
 | `steps-unreadable` | The task's steps could not be read. |
 | `attachments-unreadable` | The list of attachment names could not be read. |
 
@@ -160,7 +160,7 @@ docs/                     app registration guide
 
 The archive is the source of truth. The reader saves raw Graph JSON, and every other format is generated from that file. Properties the parser does not know about stay in the archive unchanged. When something could not be read, the archive has an extra `readNotes` property listing it.
 
-Known Graph behavior: Graph accepts `$expand=checklistItems` on the tasks collection but ignores it, so todo-exit reads steps per task through `$batch`.
+Known Graph behavior: Graph accepts `$expand=checklistItems` on the tasks collection but ignores it, so todo-exit reads steps per task through `$batch`. Graph rejects `$select` on To Do tasks with 400 Bad Request when it names `title` or `status`, and ignores it otherwise, so todo-exit never uses it.
 
 ## Roadmap
 

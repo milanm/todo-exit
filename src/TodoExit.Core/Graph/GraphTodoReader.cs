@@ -51,7 +51,9 @@ public sealed class GraphRequestException : Exception
 /// Facts measured against a live account that shape this class:
 /// Graph accepts $expand=checklistItems on the tasks collection but ignores it, so steps are always read
 /// per task, through $batch. Explicit $top/$skip paging works. A corrupt task can make every page that contains
-/// it return 200 with truncated JSON; such pages are bisected and the task is salvaged with $select or skipped.
+/// it return 200 with truncated JSON; such pages are bisected down to the single task, whose broken body is parsed
+/// leniently to keep every property Graph sent (see <see cref="BrokenTaskParser"/>). Graph rejects $select on
+/// To Do tasks, so no request uses it.
 /// </remarks>
 public sealed class GraphTodoReader
 {
@@ -61,8 +63,8 @@ public sealed class GraphTodoReader
     public const int BatchSize = 20;
     public const int MaxBatchesInFlight = 4;
 
-    internal const string SalvageSelectWide = "id,title,status,createdDateTime,lastModifiedDateTime";
-    internal const string SalvageSelectNarrow = "id,title";
+    /// <summary>After this many windows in a row yield no task at all, the reader stops reading that list.</summary>
+    internal const int MaxDeadWindows = 2;
 
     private static readonly TimeSpan MaxRetryDelay = TimeSpan.FromMinutes(2);
 
@@ -141,17 +143,14 @@ public sealed class GraphTodoReader
 
     // ------------------------------------------------------------------ tasks
 
-    private static string PageUrl(ListContext list, int skip, int top, string? select = null)
+    private static string PageUrl(ListContext list, int skip, int top)
     {
+        // Never add $select: Graph answers 400 for any $select on To Do tasks that names title or status,
+        // and ignores the others.
         var url = $"{list.TasksUrl}?$top={top.ToString(CultureInfo.InvariantCulture)}";
         if (skip > 0)
         {
             url += $"&$skip={skip.ToString(CultureInfo.InvariantCulture)}";
-        }
-
-        if (select is not null)
-        {
-            url += "&$select=" + select;
         }
 
         return url;
@@ -159,25 +158,20 @@ public sealed class GraphTodoReader
 
     /// <summary>
     /// Reads all tasks with explicit $top/$skip windows. @odata.nextLink is only the signal that more pages exist.
-    /// A window whose body stays invalid JSON is bisected so every readable task is still read.
+    /// A window that cannot be read (invalid JSON twice, or an error status other than 401) is bisected,
+    /// so every readable task is still read.
     /// </summary>
     private async Task<List<JsonObject>> ReadTasksAsync(
         ListContext list, int tasksBefore, IProgress<ReadProgress>? progress, CancellationToken cancellationToken)
     {
         var tasks = new List<JsonObject>();
         var skip = 0;
+        var deadWindows = 0;
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var page = await GetPageAsync(PageUrl(list, skip, PageSize), cancellationToken).ConfigureAwait(false);
-            if (page is null)
-            {
-                // Poisoned window: read what can be read, then continue with the next window.
-                // If this was the last window, the next request returns an empty page without a nextLink.
-                await BisectAsync(list, skip, PageSize, tasks, cancellationToken).ConfigureAwait(false);
-                skip += PageSize;
-            }
-            else
+            var result = await TryGetPageAsync(PageUrl(list, skip, PageSize), cancellationToken).ConfigureAwait(false);
+            if (result.Page is { } page)
             {
                 var values = TakeValues(page);
                 tasks.AddRange(values);
@@ -190,20 +184,37 @@ public sealed class GraphTodoReader
 
                 EnsureTrustedNextLink(next);
                 skip += values.Count;
+                deadWindows = 0;
                 continue;
             }
 
+            // Broken window: read what can be read, then continue with the next window.
+            // If this was the last window, the next request returns an empty page without a nextLink.
+            var before = tasks.Count;
+            var errorsBefore = ErrorCount();
+            await BisectAsync(list, skip, PageSize, result, tasks, cancellationToken).ConfigureAwait(false);
+            skip += PageSize;
             progress?.Report(new ReadProgress(ReadPhase.Tasks, list.Index, list.Total, tasksBefore + tasks.Count, list.Name));
+
+            var dead = tasks.Count == before && ErrorCount() > errorsBefore;
+            deadWindows = dead ? deadWindows + 1 : 0;
+            if (deadWindows >= MaxDeadWindows)
+            {
+                // Every request in the last windows failed: stop instead of probing forever.
+                break;
+            }
         }
 
         return tasks;
     }
 
-    private async Task BisectAsync(ListContext list, int skip, int top, List<JsonObject> into, CancellationToken cancellationToken)
+    /// <param name="failed">The failed result for [skip, skip+top). Its raw body is used to salvage a single task.</param>
+    private async Task BisectAsync(
+        ListContext list, int skip, int top, PageResult failed, List<JsonObject> into, CancellationToken cancellationToken)
     {
         if (top <= 1)
         {
-            await SalvageAsync(list, skip, into, cancellationToken).ConfigureAwait(false);
+            Salvage(list, skip, failed, into);
             return;
         }
 
@@ -211,12 +222,8 @@ public sealed class GraphTodoReader
         foreach (var (s, t) in new[] { (skip, half), (skip + half, top - half) })
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var page = await GetPageAsync(PageUrl(list, s, t), cancellationToken).ConfigureAwait(false);
-            if (page is null)
-            {
-                await BisectAsync(list, s, t, into, cancellationToken).ConfigureAwait(false);
-            }
-            else
+            var result = await TryGetPageAsync(PageUrl(list, s, t), cancellationToken).ConfigureAwait(false);
+            if (result.Page is { } page)
             {
                 var values = TakeValues(page);
                 into.AddRange(values);
@@ -225,39 +232,70 @@ public sealed class GraphTodoReader
                     return; // past the end of the list
                 }
             }
+            else
+            {
+                await BisectAsync(list, s, t, result, into, cancellationToken).ConfigureAwait(false);
+            }
         }
     }
 
-    /// <summary>A single task whose page is unreadable: try narrower $select lists, else record it as skipped.</summary>
-    private async Task SalvageAsync(ListContext list, int position, List<JsonObject> into, CancellationToken cancellationToken)
+    /// <summary>
+    /// A single task whose page could not be read. If Graph sent a broken body, keep every property it managed
+    /// to send. Without an id the task is recorded as unreadable.
+    /// </summary>
+    private void Salvage(ListContext list, int position, PageResult failed, List<JsonObject> into)
     {
-        foreach (var select in new[] { SalvageSelectWide, SalvageSelectNarrow })
+        if (failed.RawBody is { } raw)
         {
-            var page = await GetPageAsync(PageUrl(list, position, 1, select), cancellationToken).ConfigureAwait(false);
-            if (page is null)
+            BrokenTaskParser.Result salvaged;
+            try
             {
-                continue;
+                salvaged = BrokenTaskParser.Parse(raw);
+            }
+            catch (Exception ex) when (ex is JsonException or ArgumentException or InvalidOperationException)
+            {
+                salvaged = new BrokenTaskParser.Result(null, null, null);
             }
 
-            var values = TakeValues(page);
-            if (values.Count == 0)
+            var task = salvaged.Task;
+            if (task is null || task.Count == 0)
             {
-                return; // nothing at this position after all
+                // Nothing at all could be read from the body.
+            }
+            else if (GetString(task, "id") is { } id)
+            {
+                task[ReadNotes.PartialMarker] = true;
+                into.Add(task);
+                AddError(new ReadError(ReadErrorKinds.TaskPartial, list.Id, list.Name, id, GetString(task, "title"), position,
+                    DescribeBreak(salvaged) + " The task is kept with the properties Graph sent before that."));
+                return;
+            }
+            else
+            {
+                AddError(new ReadError(ReadErrorKinds.TaskUnreadable, list.Id, list.Name, null, GetString(task, "title"), position,
+                    DescribeBreak(salvaged) + " The task id was not among the properties Graph sent, so the task is not in the archive."));
+                return;
             }
 
-            var task = values[0];
-            task[ReadNotes.PartialMarker] = true;
-            into.Add(task);
-            AddError(new ReadError(ReadErrorKinds.TaskPartial, list.Id, list.Name, GetString(task, "id"), GetString(task, "title"), position,
-                $"Graph returned broken data for this task. Only these properties could be read: {select}."));
+            AddError(new ReadError(ReadErrorKinds.TaskUnreadable, list.Id, list.Name, null, null, position,
+                "Graph returned broken data for this task and nothing could be recovered. The task is not in the archive."));
             return;
         }
 
+        var reason = failed.Error is { } error ? error.Message : "Graph returned no usable data for this task.";
         AddError(new ReadError(ReadErrorKinds.TaskUnreadable, list.Id, list.Name, null, null, position,
-            "Graph returned broken data for this task, even when asked for its id and title only. The task is not in the archive."));
+            reason + " The task is not in the archive."));
     }
 
-    // ------------------------------------------------------------------ steps
+    private static string DescribeBreak(BrokenTaskParser.Result salvaged)
+    {
+        var code = salvaged.ErrorCode is null ? string.Empty : $" ({salvaged.ErrorCode})";
+        return salvaged.FailedProperty is { } property
+            ? $"Graph failed while writing '{property}' for this task{code}."
+            : $"Graph returned broken data for this task{code}.";
+    }
+
+        // ------------------------------------------------------------------ steps
 
     private async Task ReadStepsAsync(
         ListContext list, List<JsonObject> tasks, int tasksRead, IProgress<ReadProgress>? progress, CancellationToken cancellationToken)
@@ -631,19 +669,49 @@ public sealed class GraphTodoReader
         }
     }
 
-    /// <summary>GET one page. A body that is not valid JSON is retried once; if it is still invalid, returns null.</summary>
-    private async Task<JsonObject?> GetPageAsync(string url, CancellationToken cancellationToken)
+    /// <summary>Outcome of reading one page: a parsed page, or the raw invalid body and/or the error.</summary>
+    private sealed record PageResult(JsonObject? Page, string? RawBody, GraphRequestException? Error);
+
+    /// <summary>
+    /// GET one page without throwing for Graph errors other than 401. A body that is not valid JSON is retried once.
+    /// When the retry fails with an error status, the raw body of the first attempt is kept.
+    /// </summary>
+    private async Task<PageResult> TryGetPageAsync(string url, CancellationToken cancellationToken)
     {
+        string? raw = null;
         for (var attempt = 0; attempt < 2; attempt++)
         {
-            var body = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, url), url, cancellationToken).ConfigureAwait(false);
+            string body;
+            try
+            {
+                body = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, url), url, cancellationToken).ConfigureAwait(false);
+            }
+            catch (GraphRequestException ex) when (ex.StatusCode != HttpStatusCode.Unauthorized)
+            {
+                return new PageResult(null, raw, ex);
+            }
+
             if (TryParseObject(body) is { } obj)
             {
-                return obj;
+                return new PageResult(obj, null, null);
             }
+
+            raw = body;
         }
 
-        return null;
+        return new PageResult(null, raw, null);
+    }
+
+    /// <summary>GET one page. Throws for Graph errors; returns null when the body stays invalid JSON.</summary>
+    private async Task<JsonObject?> GetPageAsync(string url, CancellationToken cancellationToken)
+    {
+        var result = await TryGetPageAsync(url, cancellationToken).ConfigureAwait(false);
+        if (result.Error is { } error)
+        {
+            throw error;
+        }
+
+        return result.Page;
     }
 
     private async Task<JsonObject?> SendBatchAsync(string payload, CancellationToken cancellationToken)
@@ -815,6 +883,14 @@ public sealed class GraphTodoReader
     }
 
     // ------------------------------------------------------------------ helpers
+
+    private int ErrorCount()
+    {
+        lock (_errorsLock)
+        {
+            return _errors.Count;
+        }
+    }
 
     private void AddError(ReadError error)
     {

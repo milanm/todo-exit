@@ -175,19 +175,32 @@ public class GraphTodoReaderTests
         Assert.Empty(doc.ReadNotes.Errors);
     }
 
+    private static JsonObject RichTask(int i) => new()
+    {
+        ["@odata.etag"] = $"W/\"etag{i}\"",
+        ["importance"] = "high",
+        ["isReminderOn"] = false,
+        ["status"] = "inProgress",
+        ["title"] = $"Task {i}",
+        ["createdDateTime"] = "2026-10-01T08:00:00.0000000Z",
+        ["lastModifiedDateTime"] = "2026-11-02T09:30:00.0000000Z",
+        ["hasAttachments"] = false,
+        ["categories"] = new JsonArray("Work", "Blue category"),
+        ["id"] = $"t{i}",
+        ["body"] = new JsonObject { ["content"] = $"Notes for {i}", ["contentType"] = "text" },
+        ["completedDateTime"] = new JsonObject { ["dateTime"] = "2026-11-03T00:00:00.0000000", ["timeZone"] = "UTC" },
+        ["dueDateTime"] = new JsonObject { ["dateTime"] = "2026-11-24T23:00:00.0000000", ["timeZone"] = "UTC" },
+        ["reminderDateTime"] = new JsonObject { ["dateTime"] = "2026-11-25T08:00:00.0000000", ["timeZone"] = "UTC" },
+        ["linkedResources"] = new JsonArray(),
+    };
+
     [Fact]
-    public async Task Poisoned_page_is_retried_once_bisected_and_the_bad_task_salvaged_as_partial()
+    public async Task Poisoned_page_is_retried_once_bisected_and_the_bad_task_salvaged_from_its_broken_body()
     {
         var graph = new FakeGraph();
-        var list = graph.AddList("L1", "Big", 250, i => new JsonObject
-        {
-            ["id"] = $"t{i}",
-            ["title"] = $"Task {i}",
-            ["status"] = "notStarted",
-            ["importance"] = "high",
-            ["createdDateTime"] = "2026-10-01T08:00:00Z",
-        });
-        list.Poisoned[137] = "wide";
+        var list = graph.AddList("L1", "Big", 250, RichTask);
+        list.Poisoned[137] = "linked";
+        graph.Steps["t137"] = StepsFor("step of the broken task");
 
         var (reader, _) = Create(graph);
         var doc = await reader.ReadAsync();
@@ -195,65 +208,155 @@ public class GraphTodoReaderTests
         var urls = graph.Requests.Select(r => r.Url).ToList();
         Assert.Equal(2, urls.Count(u => u == $"{Base}me/todo/lists/L1/tasks?$top=100&$skip=100"));
         Assert.Contains($"{Base}me/todo/lists/L1/tasks?$top=50&$skip=100", urls);
-        Assert.Contains($"{Base}me/todo/lists/L1/tasks?$top=1&$skip=137&$select={GraphTodoReader.SalvageSelectWide}", urls);
+        Assert.Equal(2, urls.Count(u => u == $"{Base}me/todo/lists/L1/tasks?$top=1&$skip=137"));
+        Assert.DoesNotContain(graph.Requests, r => r.Url.Contains("$select", StringComparison.OrdinalIgnoreCase));
 
         var tasks = ArchiveTasks(doc);
         Assert.Equal(Enumerable.Range(0, 250).Select(i => $"t{i}"), tasks.Select(t => (string)t["id"]!));
+
         var partial = tasks[137];
         Assert.True((bool)partial["todoExitPartial"]!);
-        Assert.Null(partial["importance"]);
         Assert.Equal("Task 137", (string)partial["title"]!);
-        Assert.Equal("high", (string)tasks[136]["importance"]!);
-        Assert.Equal("high", (string)tasks[138]["importance"]!);
+        Assert.Equal("inProgress", (string)partial["status"]!);
+        Assert.Equal("Notes for 137", (string)partial["body"]!["content"]!);
+        Assert.Equal("2026-11-24T23:00:00.0000000", (string)partial["dueDateTime"]!["dateTime"]!);
+        Assert.Equal("2026-10-01T08:00:00.0000000Z", (string)partial["createdDateTime"]!);
+        Assert.Equal(["Work", "Blue category"], partial["categories"]!.AsArray().Select(c => (string)c!));
+        Assert.False(partial.ContainsKey("linkedResources@odata.context"));
+        Assert.Equal("step of the broken task", (string)partial["checklistItems"]![0]!["displayName"]!);
+        Assert.Contains(graph.Posts.SelectMany(p => p.Body!["requests"]!.AsArray()), r => ((string)r!["url"]!).Contains("/t137/"));
 
         var error = Assert.Single(doc.ReadNotes.Errors);
-        Assert.Equal((ReadErrorKinds.TaskPartial, 137, "t137", "Big"), (error.Kind, error.Position!.Value, error.TaskId!, error.ListName!));
+        Assert.Equal((ReadErrorKinds.TaskPartial, 137, "t137", "Task 137"), (error.Kind, error.Position!.Value, error.TaskId!, error.TaskTitle!));
+        Assert.Contains("linkedResources", error.Message);
+        Assert.Contains("InternalServerError", error.Message);
 
         var archive = ArchiveParser.Parse(doc, TimeZoneInfo.Utc);
-        Assert.True(archive.Lists[0].Tasks[137].IsPartial);
+        var item = archive.Lists[0].Tasks[137];
+        Assert.True(item.IsPartial);
+        Assert.Empty(item.LinkedResources);
+        Assert.Equal(new DateOnly(2026, 11, 24), item.DueDate);
         Assert.Equal(1, Inventory.From(archive).Totals.Partial);
     }
 
     [Fact]
-    public async Task Narrow_select_is_the_second_salvage_step()
+    public async Task Single_task_list_with_a_poisoned_task_is_salvaged()
     {
         var graph = new FakeGraph();
-        var list = graph.AddList("L1", "One", 4);
-        list.Poisoned[2] = "narrow";
+        var list = graph.AddList("L1", "One", 1, RichTask);
+        list.Poisoned[0] = "linked";
 
         var (reader, _) = Create(graph);
         var doc = await reader.ReadAsync();
 
-        Assert.Contains($"{Base}me/todo/lists/L1/tasks?$top=1&$skip=2&$select={GraphTodoReader.SalvageSelectNarrow}", graph.Requests.Select(r => r.Url));
-        var tasks = ArchiveTasks(doc);
-        Assert.Equal(4, tasks.Count);
-        Assert.True((bool)tasks[2]["todoExitPartial"]!);
-        Assert.Null(tasks[2]["status"]);
+        var task = Assert.Single(ArchiveTasks(doc));
+        Assert.Equal("t0", (string)task["id"]!);
+        Assert.True((bool)task["todoExitPartial"]!);
+        Assert.Equal(ReadErrorKinds.TaskPartial, Assert.Single(doc.ReadNotes.Errors).Kind);
+        Assert.DoesNotContain(graph.Requests, r => r.Url.Contains("$select"));
     }
 
     [Fact]
-    public async Task Unsalvageable_task_is_skipped_and_recorded_with_its_position()
+    public async Task Task_that_breaks_before_its_id_is_skipped_and_recorded_with_its_position()
     {
         var graph = new FakeGraph();
-        var list = graph.AddList("L1", "One", 10);
-        list.Poisoned[5] = "none";
+        var list = graph.AddList("L1", "One", 10, RichTask);
+        list.Poisoned[5] = "early";
 
         var (reader, _) = Create(graph);
         var doc = await reader.ReadAsync();
 
         var tasks = ArchiveTasks(doc);
         Assert.Equal(9, tasks.Count);
-        Assert.DoesNotContain(tasks, t => (string)t["id"]! == "L1-t5");
+        Assert.DoesNotContain(tasks, t => (string)t["id"]! == "t5");
 
         var error = Assert.Single(doc.ReadNotes.Errors);
         Assert.Equal(ReadErrorKinds.TaskUnreadable, error.Kind);
         Assert.Equal(5, error.Position);
         Assert.Null(error.TaskId);
         Assert.Equal("L1", error.ListId);
+        Assert.Contains("InternalServerError", error.Message);
 
         var archive = ArchiveParser.Parse(doc, TimeZoneInfo.Utc);
         Assert.Equal(1, Inventory.From(archive).Totals.Unreadable);
         Assert.Equal(1, Inventory.From(archive).PerList[0].Counts.Unreadable);
+    }
+
+    [Fact]
+    public async Task Plain_truncation_is_salvaged_up_to_the_last_complete_property()
+    {
+        var graph = new FakeGraph();
+        var list = graph.AddList("L1", "One", 3, RichTask);
+        list.Poisoned[1] = "truncated";
+
+        var (reader, _) = Create(graph);
+        var doc = await reader.ReadAsync();
+
+        var tasks = ArchiveTasks(doc);
+        Assert.Equal(3, tasks.Count);
+        var partial = tasks[1];
+        Assert.Equal("t1", (string)partial["id"]!);
+        Assert.Equal("Task 1", (string)partial["title"]!);
+        Assert.Equal("2026-11-02T09:30:00.0000000Z", (string)partial["lastModifiedDateTime"]!);
+        Assert.False(partial.ContainsKey("body"));
+        Assert.False(partial.ContainsKey("dueDateTime"));
+        var error = Assert.Single(doc.ReadNotes.Errors);
+        Assert.Equal(ReadErrorKinds.TaskPartial, error.Kind);
+        Assert.Contains("'body'", error.Message);
+    }
+
+    [Fact]
+    public async Task Error_status_on_a_sub_window_during_bisection_is_recorded_and_the_run_continues()
+    {
+        var graph = new FakeGraph();
+        var list = graph.AddList("L1", "One", 150, RichTask);
+        list.Poisoned[10] = "linked";
+        // During bisection, the single-task window at position 60 answers 400.
+        graph.Intercept = (r, _) => r.Url == $"{Base}me/todo/lists/L1/tasks?$top=1&$skip=60"
+            ? FakeGraph.Json("""{ "error": { "code": "invalidRequest", "message": "Invalid request" } }""", HttpStatusCode.BadRequest)
+            : null;
+        // Make 60 fail at every larger window too, so bisection has to reach it.
+        list.Poisoned[60] = "early";
+
+        var (reader, _) = Create(graph);
+        var doc = await reader.ReadAsync();
+
+        var tasks = ArchiveTasks(doc);
+        Assert.Equal(149, tasks.Count);
+        Assert.Equal("t149", (string)tasks[^1]["id"]!);
+        Assert.Equal(2, doc.ReadNotes.Errors.Count);
+        var unreadable = doc.ReadNotes.Errors.Single(e => e.Kind == ReadErrorKinds.TaskUnreadable);
+        Assert.Equal(60, unreadable.Position);
+        Assert.Contains("400", unreadable.Message);
+        Assert.Contains(doc.ReadNotes.Errors, e => e.Kind == ReadErrorKinds.TaskPartial && e.Position == 10);
+    }
+
+    [Fact]
+    public async Task Fake_graph_rejects_select_with_title_like_the_live_api()
+    {
+        var graph = new FakeGraph();
+        graph.AddList("L1", "One", 1);
+        var http = new HttpClient(graph);
+        var response = await http.GetAsync($"{Base}me/todo/lists/L1/tasks?$top=1&$select=id,title");
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("invalidRequest", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task A_list_that_fails_everywhere_does_not_loop_forever()
+    {
+        var graph = new FakeGraph();
+        graph.AddList("L1", "One", 3);
+        graph.Intercept = (r, _) => r.Url.Contains("/tasks?")
+            ? FakeGraph.Json("""{ "error": { "code": "invalidRequest", "message": "Invalid request" } }""", HttpStatusCode.BadRequest)
+            : null;
+
+        var (reader, _) = Create(graph);
+        var doc = await reader.ReadAsync();
+
+        Assert.Empty(ArchiveTasks(doc));
+        Assert.All(doc.ReadNotes.Errors, e => Assert.Equal(ReadErrorKinds.TaskUnreadable, e.Kind));
+        Assert.Equal(2 * GraphTodoReader.PageSize, doc.ReadNotes.Errors.Count);
     }
 
     [Fact]

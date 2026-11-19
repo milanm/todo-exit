@@ -26,7 +26,10 @@ internal sealed class FakeGraph : HttpMessageHandler
 
         public List<JsonObject> Tasks { get; } = new();
 
-        /// <summary>Position -> which $select still works: "wide", "narrow" or "none".</summary>
+        /// <summary>
+        /// Position -> how the task breaks: "linked" (real shape: properties streamed, then linkedResources fails),
+        /// "early" (breaks right after @odata.etag, before id) or "truncated" (cut mid-string inside body, no error object).
+        /// </summary>
         public Dictionary<int, string> Poisoned { get; } = new();
     }
 
@@ -240,54 +243,75 @@ internal sealed class FakeGraph : HttpMessageHandler
 
     private (HttpStatusCode, string) TasksPage(FakeList list, Dictionary<string, string> query)
     {
+        if (query.TryGetValue("$select", out var select)
+            && select.Split(',').Any(f => f.Trim() is "title" or "status"))
+        {
+            // Measured on a live account: any $select naming title or status is rejected for every task.
+            return (HttpStatusCode.BadRequest, """{ "error": { "code": "invalidRequest", "message": "Invalid request" } }""");
+        }
+
         var top = query.TryGetValue("$top", out var t) ? int.Parse(t) : 10;
         var skip = query.TryGetValue("$skip", out var s) ? int.Parse(s) : 0;
-        query.TryGetValue("$select", out var select);
         var end = Math.Min(skip + top, list.Tasks.Count);
+        var nextLink = end < list.Tasks.Count
+            ? $"{Base}me/todo/lists/{list.Id}/tasks?$top={top}&$skip={end}"
+            : null;
 
         var parts = new List<string>();
         for (var i = skip; i < end; i++)
         {
-            if (list.Poisoned.TryGetValue(i, out var salvage) && !Salvageable(salvage, select))
+            if (list.Poisoned.TryGetValue(i, out var kind))
             {
-                // Valid start, then the array stops and an error object is appended: invalid JSON.
-                var broken = "{\"value\":[" + string.Join(",", parts) + (parts.Count > 0 ? "," : string.Empty)
-                    + "{\"id\":\"" + list.Tasks[i]["id"] + "\",\"title\":\"x"
-                    + "{\"error\":{\"code\":\"InternalServerError\",\"message\":\"Corrupt item\"}}}";
-                return (HttpStatusCode.OK, broken);
+                // Graph streams @odata.context and @odata.nextLink before value.
+                var head = "{\"@odata.context\":\"https://graph.microsoft.com/v1.0/$metadata#tasks\","
+                    + (nextLink is null ? string.Empty : $"\"@odata.nextLink\":\"{nextLink}\",")
+                    + "\"value\":[" + string.Join(",", parts) + (parts.Count > 0 ? "," : string.Empty);
+                return (HttpStatusCode.OK, head + BrokenTask(list.Tasks[i], kind));
             }
 
-            var task = list.Tasks[i].DeepClone().AsObject();
-            if (select is not null)
-            {
-                var keep = select.Split(',').ToHashSet();
-                foreach (var key in task.Select(p => p.Key).ToList())
-                {
-                    if (!keep.Contains(key))
-                    {
-                        task.Remove(key);
-                    }
-                }
-            }
-
-            parts.Add(task.ToJsonString());
+            parts.Add(list.Tasks[i].ToJsonString());
         }
 
         var page = "{\"value\":[" + string.Join(",", parts) + "]";
-        if (end < list.Tasks.Count)
+        if (nextLink is not null)
         {
-            page += $",\"@odata.nextLink\":\"{Base}me/todo/lists/{list.Id}/tasks?$top={top}&$skip={end}\"";
+            page += $",\"@odata.nextLink\":\"{nextLink}\"";
         }
 
         return (HttpStatusCode.OK, page + "}");
     }
 
-    private static bool Salvageable(string level, string? select) => select switch
+    public const string AppendedError =
+        "{\"error\":{\"code\":\"InternalServerError\",\"message\":\"An internal server error occurred.\","
+        + "\"innerError\":{\"date\":\"2026-11-20T10:00:00\",\"request-id\":\"r\",\"client-request-id\":\"c\"}}}";
+
+    /// <summary>The task as Graph streams it when it breaks, modelled on a body captured from a live account.</summary>
+    private static string BrokenTask(JsonObject task, string kind)
     {
-        null => false,
-        "id,title" => level is "wide" or "narrow",
-        _ => level == "wide",
-    };
+        string[] order =
+        [
+            "@odata.etag", "importance", "isReminderOn", "status", "title", "createdDateTime", "lastModifiedDateTime",
+            "hasAttachments", "categories", "id", "body", "completedDateTime", "dueDateTime", "reminderDateTime",
+        ];
+
+        var props = order.Where(task.ContainsKey).Select(k => $"\"{k}\":{task[k]!.ToJsonString()}").ToList();
+        switch (kind)
+        {
+            case "early":
+                return "{" + props[0] + AppendedError;
+            case "truncated":
+            {
+                // Everything up to and including id, then body cut in the middle of its content string.
+                var upTo = props.TakeWhile(p => !p.StartsWith("\"body\"", StringComparison.Ordinal)).ToList();
+                return "{" + string.Join(",", upTo) + ",\"body\":{\"content\":\"Notes fo";
+            }
+
+            default:
+                return "{" + string.Join(",", props)
+                    + ",\"linkedResources@odata.context\":\"https://graph.microsoft.com/v1.0/$metadata#linkedResources\""
+                    + ",\"linkedResources\":[" + AppendedError;
+        }
+    }
 
     private static (HttpStatusCode, string) NotMocked(string url) =>
         (HttpStatusCode.NotFound, $$"""{ "error": { "code": "NotMocked", "message": "{{url}}" } }""");
