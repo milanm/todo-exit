@@ -48,7 +48,7 @@ As of 2026-11-19:
 - The repeat-rule phrases in `RecurrenceText.cs`: Todoist accepted every phrase the tool can write as a recurring task with the right next date.
 - The unit tests run on Linux and Windows on every push.
 
-Not tested yet: work and school accounts, browsers other than Chrome and Edge, and `--resume` against the real Graph (it is covered by tests against a fake one).
+Not tested yet: work and school accounts, browsers that are not based on Chromium, and `--resume` against the real Graph (it is covered by tests against a fake one).
 
 ### Microsoft Graph behavior observed
 
