@@ -103,27 +103,132 @@ public class GraphTodoReaderTests
     }
 
     [Fact]
-    public async Task Throttled_sub_responses_are_retried_alone_after_retry_after()
+    public async Task Throttled_sub_responses_are_retried_in_a_new_batch_after_the_longest_retry_after()
     {
         var graph = new FakeGraph();
-        graph.AddList("L1", "One", 25);
-        graph.Steps["L1-t3"] = StepsFor("three");
-        graph.Steps["L1-t22"] = StepsFor("twenty-two");
-        graph.ThrottleOnce.UnionWith(["L1-t3", "L1-t22"]);
+        graph.AddList("L1", "One", 20);
+        foreach (var (id, ra) in new[] { ("L1-t2", "3"), ("L1-t5", "9"), ("L1-t7", "1") })
+        {
+            graph.ThrottleOnce.Add(id);
+            graph.RetryAfterFor[id] = ra;
+        }
+
+        graph.Steps["L1-t5"] = StepsFor("five");
 
         var (reader, delays) = Create(graph);
         var doc = await reader.ReadAsync();
 
+        Assert.Equal([TimeSpan.FromSeconds(9)], delays);
         var posts = graph.Posts.ToList();
-        Assert.Equal(3, posts.Count);
-        var retry = posts[2].Body!["requests"]!.AsArray().Select(r => (string)r!["url"]!).ToList();
-        Assert.Equal(["/me/todo/lists/L1/tasks/L1-t3/checklistItems", "/me/todo/lists/L1/tasks/L1-t22/checklistItems"], retry);
-        Assert.Equal([TimeSpan.FromSeconds(4)], delays);
-
-        var archive = ArchiveParser.Parse(doc, TimeZoneInfo.Utc);
-        Assert.Equal("three", archive.Lists[0].Tasks[3].Steps.Single().Title);
-        Assert.Equal("twenty-two", archive.Lists[0].Tasks[22].Steps.Single().Title);
+        Assert.Equal(2, posts.Count);
+        var retry = posts[1].Body!["requests"]!.AsArray().Select(r => (string)r!["url"]!).ToList();
+        Assert.Equal(
+        [
+            "/me/todo/lists/L1/tasks/L1-t2/checklistItems",
+            "/me/todo/lists/L1/tasks/L1-t5/checklistItems",
+            "/me/todo/lists/L1/tasks/L1-t7/checklistItems",
+        ], retry);
+        Assert.Equal("five", ArchiveParser.Parse(doc, TimeZoneInfo.Utc).Lists[0].Tasks[5].Steps.Single().Title);
         Assert.True(doc.ReadNotes.IsEmpty);
+    }
+
+    [Fact]
+    public async Task Batch_shrinks_to_four_after_a_throttle_and_grows_back_after_five_clean_batches()
+    {
+        var graph = new FakeGraph();
+        graph.AddList("L1", "One", 60);
+        graph.ThrottleOnce.Add("L1-t0");
+
+        var (reader, _) = Create(graph);
+        await reader.ReadAsync();
+
+        Assert.Equal([20, 4, 4, 4, 4, 4, 20, 1], reader.BatchSizesSent);
+        Assert.Equal(reader.BatchSizesSent, graph.Posts.Select(SubRequestCount));
+        Assert.Equal("/me/todo/lists/L1/tasks/L1-t0/checklistItems", (string)graph.Posts.ElementAt(1).Body!["requests"]![0]!["url"]!);
+    }
+
+    [Fact]
+    public async Task Ten_throttle_rounds_then_steps_unreadable()
+    {
+        var graph = new FakeGraph();
+        graph.AddList("L1", "One", 3);
+        graph.ThrottleTimes["L1-t1"] = 100;
+        graph.RetryAfterFor["L1-t1"] = "1";
+        graph.Steps["L1-t0"] = StepsFor("ok");
+
+        var (reader, delays) = Create(graph);
+        var doc = await reader.ReadAsync();
+
+        Assert.Equal(GraphTodoReader.MaxThrottleRounds, graph.Posts.Count());
+        Assert.Equal(new[] { 2, 4, 8, 16, 32, 64, 128, 128, 128 }.Select(x => TimeSpan.FromSeconds(x)), delays);
+        var error = Assert.Single(doc.ReadNotes.Errors);
+        Assert.Equal((ReadErrorKinds.StepsUnreadable, "L1-t1"), (error.Kind, error.TaskId!));
+        Assert.Contains("10 attempts", error.Message);
+        Assert.Equal("ok", ArchiveParser.Parse(doc, TimeZoneInfo.Utc).Lists[0].Tasks[0].Steps.Single().Title);
+    }
+
+    [Fact]
+    public async Task A_single_throttle_wait_is_capped_at_five_minutes()
+    {
+        var graph = new FakeGraph();
+        graph.AddList("L1", "One", 2);
+        graph.ThrottleOnce.Add("L1-t0");
+        graph.RetryAfterFor["L1-t0"] = "900";
+
+        var (reader, delays) = Create(graph);
+        await reader.ReadAsync();
+
+        Assert.Equal([TimeSpan.FromMinutes(5)], delays);
+        Assert.Equal(TimeSpan.FromMinutes(5), GraphTodoReader.ThrottleDelay(TimeSpan.FromHours(1), 0));
+        Assert.Equal(TimeSpan.FromSeconds(30), GraphTodoReader.ThrottleDelay(TimeSpan.FromSeconds(30), 0));
+        Assert.Equal(TimeSpan.FromSeconds(8), GraphTodoReader.ThrottleDelay(TimeSpan.FromSeconds(1), 2));
+    }
+
+    [Fact]
+    public async Task Progress_reports_the_throttle_wait()
+    {
+        var graph = new FakeGraph();
+        graph.AddList("L1", "One", 2);
+        graph.ThrottleOnce.Add("L1-t1");
+        graph.RetryAfterFor["L1-t1"] = "30";
+
+        var (reader, _) = Create(graph);
+        var progress = new List<ReadProgress>();
+        await reader.ReadAsync(new SyncProgress(progress.Add));
+
+        var waiting = Assert.Single(progress, p => p.IsWaiting);
+        Assert.Equal(30, waiting.WaitingSeconds);
+        Assert.Equal(ReadPhase.Steps, waiting.Phase);
+        Assert.Equal("One", waiting.CurrentList);
+        var after = progress[progress.IndexOf(waiting) + 1];
+        Assert.False(after.IsWaiting);
+    }
+
+    [Fact]
+    public async Task Throttled_page_get_uses_the_patient_policy()
+    {
+        var graph = new FakeGraph();
+        graph.AddList("L1", "One", 1);
+        graph.Intercept = (r, _) =>
+        {
+            if (!r.Url.EndsWith("tasks?$top=100", StringComparison.Ordinal) || graph.Requests.Count(x => x.Url == r.Url) > 7)
+            {
+                return null;
+            }
+
+            var response = new HttpResponseMessage(HttpStatusCode.TooManyRequests) { Content = new StringContent(string.Empty) };
+            response.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromSeconds(30));
+            return response;
+        };
+
+        var (reader, delays) = Create(graph);
+        var progress = new List<ReadProgress>();
+        var doc = await reader.ReadAsync(new SyncProgress(progress.Add));
+
+        // Seven throttles: more than MaxRetries (5), within MaxThrottleRounds (10).
+        Assert.Equal(new[] { 30, 30, 30, 30, 32, 64, 128 }.Select(x => TimeSpan.FromSeconds(x)), delays);
+        Assert.Single(ArchiveTasks(doc));
+        Assert.Equal(7, progress.Count(p => p.IsWaiting));
     }
 
     [Fact]
@@ -390,7 +495,7 @@ public class GraphTodoReaderTests
     }
 
     [Fact]
-    public async Task Gives_up_after_five_retries()
+    public async Task Gives_up_after_ten_throttle_rounds()
     {
         var graph = new FakeGraph();
         graph.Intercept = (_, _) =>
@@ -403,10 +508,23 @@ public class GraphTodoReaderTests
         var (reader, delays) = Create(graph);
         var ex = await Assert.ThrowsAsync<GraphRequestException>(() => reader.ReadAsync());
 
-        Assert.Equal(5, delays.Count);
-        Assert.All(delays, d => Assert.Equal(TimeSpan.FromSeconds(7), d));
-        Assert.Equal(6, graph.Requests.Count);
+        Assert.Equal(new[] { 7, 7, 8, 16, 32, 64, 128, 128, 128, 128 }.Select(x => TimeSpan.FromSeconds(x)), delays);
+        Assert.Equal(11, graph.Requests.Count);
         Assert.Equal(HttpStatusCode.TooManyRequests, ex.StatusCode);
+    }
+
+    [Fact]
+    public async Task Server_errors_give_up_after_five_retries()
+    {
+        var graph = new FakeGraph();
+        graph.Intercept = (_, _) => FakeGraph.Json("""{ "error": { "code": "InternalServerError", "message": "oops" } }""", HttpStatusCode.InternalServerError);
+
+        var (reader, delays) = Create(graph);
+        var ex = await Assert.ThrowsAsync<GraphRequestException>(() => reader.ReadAsync());
+
+        Assert.Equal(new[] { 2, 4, 8, 16, 32 }.Select(x => TimeSpan.FromSeconds(x)), delays);
+        Assert.Equal(6, graph.Requests.Count);
+        Assert.Equal(HttpStatusCode.InternalServerError, ex.StatusCode);
     }
 
     [Fact]
@@ -429,16 +547,18 @@ public class GraphTodoReaderTests
     }
 
     [Fact]
-    public async Task Never_more_than_four_batches_in_flight()
+    public async Task Never_more_than_one_batch_or_request_in_flight()
     {
-        var graph = new FakeGraph { BatchLatency = TimeSpan.FromMilliseconds(30) };
-        graph.AddList("L1", "One", 200);
+        var graph = new FakeGraph { BatchLatency = TimeSpan.FromMilliseconds(15) };
+        graph.AddList("L1", "One", 200, i => new JsonObject { ["id"] = $"t{i}", ["title"] = $"T{i}", ["hasAttachments"] = i % 50 == 0 });
 
         var (reader, _) = Create(graph);
         await reader.ReadAsync();
 
+        Assert.Equal(1, GraphTodoReader.MaxBatchesInFlight);
         Assert.Equal(10, graph.Posts.Count());
-        Assert.InRange(graph.MaxBatchesInFlight, 2, GraphTodoReader.MaxBatchesInFlight);
+        Assert.Equal(1, graph.MaxBatchesInFlight);
+        Assert.Equal(1, graph.MaxRequestsInFlight);
     }
 
     [Fact]

@@ -15,6 +15,7 @@ internal sealed class FakeGraph : HttpMessageHandler
     private readonly List<FakeList> _lists = new();
     private readonly object _lock = new();
     private int _inFlightBatches;
+    private int _inFlightAll;
 
     public sealed record Request(string Method, string Url, JsonObject? Body);
 
@@ -43,6 +44,15 @@ internal sealed class FakeGraph : HttpMessageHandler
 
     /// <summary>Task ids whose next batch sub-response is 429 (one shot each).</summary>
     public HashSet<string> ThrottleOnce { get; } = new();
+
+    /// <summary>taskId -> how many more batch sub-responses for it are 429.</summary>
+    public Dictionary<string, int> ThrottleTimes { get; } = new();
+
+    /// <summary>taskId -> Retry-After value on its throttled sub-responses. Default "4".</summary>
+    public Dictionary<string, string> RetryAfterFor { get; } = new();
+
+    /// <summary>Highest number of requests of any kind in flight at once.</summary>
+    public int MaxRequestsInFlight { get; private set; }
 
     /// <summary>Task ids whose batch sub-response is 404.</summary>
     public HashSet<string> NotFound { get; } = new();
@@ -84,6 +94,24 @@ internal sealed class FakeGraph : HttpMessageHandler
             body = JsonNode.Parse(await request.Content.ReadAsStringAsync(cancellationToken))?.AsObject();
         }
 
+        var all = Interlocked.Increment(ref _inFlightAll);
+        lock (_lock)
+        {
+            MaxRequestsInFlight = Math.Max(MaxRequestsInFlight, all);
+        }
+
+        try
+        {
+            return await HandleAsync(request, url, body, cancellationToken);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _inFlightAll);
+        }
+    }
+
+    private async Task<HttpResponseMessage> HandleAsync(HttpRequestMessage request, string url, JsonObject? body, CancellationToken cancellationToken)
+    {
         var record = new Request(request.Method.Method, url, body);
         int index;
         lock (_lock)
@@ -146,13 +174,20 @@ internal sealed class FakeGraph : HttpMessageHandler
 
             lock (_lock)
             {
-                if (ThrottleOnce.Remove(taskId))
+                var throttle = ThrottleOnce.Remove(taskId);
+                if (!throttle && ThrottleTimes.TryGetValue(taskId, out var left) && left > 0)
+                {
+                    ThrottleTimes[taskId] = left - 1;
+                    throttle = true;
+                }
+
+                if (throttle)
                 {
                     responses.Add((JsonNode)new JsonObject
                     {
                         ["id"] = id,
                         ["status"] = 429,
-                        ["headers"] = new JsonObject { ["Retry-After"] = "4" },
+                        ["headers"] = new JsonObject { ["Retry-After"] = RetryAfterFor.GetValueOrDefault(taskId, "4") },
                         ["body"] = new JsonObject { ["error"] = new JsonObject { ["code"] = "TooManyRequests", ["message"] = "slow down" } },
                     });
                     continue;

@@ -111,6 +111,10 @@ todo-exit export    (--token <t> | --token-file <path> | --from-archive <file>) 
 - While reading, the tool shows progress on one line, and when it is done it prints how many lists and tasks it read, how many read errors there were, and how long it took.
 - Exit codes: 0 on success, 1 for a usage error, 2 when the export fails.
 
+### Large accounts
+
+Steps are read at roughly 15 to 20 tasks per second, because Microsoft allows 4 concurrent requests and 10,000 requests per 10 minutes per account. When Graph asks todo-exit to slow down, it waits and shows the wait on the progress line, so a pause late in a large export is expected. To shorten a large export, use `--skip-completed-steps`.
+
 You can also install it as a .NET tool from a local build:
 
 ```

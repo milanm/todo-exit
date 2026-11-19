@@ -150,6 +150,11 @@ public static class Program
     {
         var list = p.CurrentList is null ? string.Empty : $" ({p.CurrentList})";
         var position = p.ListsTotal > 0 ? $"list {Math.Min(p.ListsDone + 1, p.ListsTotal)}/{p.ListsTotal}{list}" : "lists";
+        if (p.IsWaiting)
+        {
+            return $"Graph asked us to slow down, waiting {p.WaitingSeconds} s ({position}, {p.TasksRead} tasks)";
+        }
+
         return p.Phase switch
         {
             ReadPhase.Lists => "Reading lists...",

@@ -24,7 +24,12 @@ public sealed record ReadProgress(
     int TasksRead,
     string? CurrentList,
     int StepsDone = 0,
-    int StepsTotal = 0);
+    int StepsTotal = 0,
+    int WaitingSeconds = 0)
+{
+    /// <summary>True while the reader waits because Graph asked it to slow down (429/503).</summary>
+    public bool IsWaiting => WaitingSeconds > 0;
+}
 
 /// <summary>A Graph request failed. The message carries the status code and Graph's error text, never a token.</summary>
 public sealed class GraphRequestException : Exception
@@ -61,7 +66,24 @@ public sealed class GraphTodoReader
     public const int MaxRetries = 5;
     public const int PageSize = 100;
     public const int BatchSize = 20;
-    public const int MaxBatchesInFlight = 4;
+    /// <summary>
+    /// One batch at a time. To Do is served by Outlook, whose documented limits are 4 concurrent requests and
+    /// 10,000 requests per 10 minutes per app and mailbox. Graph sends up to 4 sub-requests of an unordered
+    /// batch to the service at once, so a single batch already uses the whole concurrency allowance; parallel
+    /// batches get 429 (MailboxConcurrency). Nothing else is sent while a batch runs.
+    /// </summary>
+    public const int MaxBatchesInFlight = 1;
+
+    /// <summary>Batch size after a throttled sub-request, until <see cref="CleanBatchesToGrow"/> clean batches in a row.</summary>
+    public const int ReducedBatchSize = 4;
+
+    public const int CleanBatchesToGrow = 5;
+
+    /// <summary>Retries for 429/503, separate from <see cref="MaxRetries"/> for network errors and other 5xx.</summary>
+    public const int MaxThrottleRounds = 10;
+
+    /// <summary>Longest single wait after a 429/503.</summary>
+    public static readonly TimeSpan MaxThrottleDelay = TimeSpan.FromMinutes(5);
 
     /// <summary>After this many windows in a row yield no task at all, the reader stops reading that list.</summary>
     internal const int MaxDeadWindows = 2;
@@ -74,6 +96,8 @@ public sealed class GraphTodoReader
     private readonly object _errorsLock = new();
     private List<ReadError> _errors = new();
     private bool _batchUnavailable;
+    private IProgress<ReadProgress>? _progress;
+    private ReadProgress _lastProgress = new(ReadPhase.Lists, 0, 0, 0, null);
 
     /// <param name="http">An HttpClient already configured with authentication.</param>
     /// <param name="delay">Delay function used for retries. Tests inject one that does not sleep.</param>
@@ -101,6 +125,9 @@ public sealed class GraphTodoReader
         _errors = new List<ReadError>();
         _batchUnavailable = false;
         StepReadMode = "none";
+        _progress = progress;
+        progress = progress is null ? null : new ProgressRelay(this);
+        BatchSizesSent.Clear();
 
         progress?.Report(new ReadProgress(ReadPhase.Lists, 0, 0, 0, null));
         var lists = await GetCollectionAsync(BaseUrl + "me/todo/lists", cancellationToken).ConfigureAwait(false)
@@ -341,31 +368,7 @@ public sealed class GraphTodoReader
         else
         {
             StepReadMode = "batch";
-            var round = pending;
-            for (var attempt = 0; round.Count > 0; attempt++)
-            {
-                var outcome = await RunBatchRoundAsync(list, round, MarkDone, cancellationToken).ConfigureAwait(false);
-                individual.AddRange(outcome.Individual);
-                if (outcome.Throttled.Count == 0)
-                {
-                    break;
-                }
-
-                if (attempt >= MaxRetries)
-                {
-                    foreach (var task in outcome.Throttled)
-                    {
-                        task["checklistItems"] = new JsonArray();
-                        AddStepsError(list, task, $"Graph kept throttling the steps request after {MaxRetries} retries.");
-                    }
-
-                    MarkDone(outcome.Throttled.Count);
-                    break;
-                }
-
-                await _delay(Clamp(outcome.RetryAfter ?? Backoff(attempt)), cancellationToken).ConfigureAwait(false);
-                round = outcome.Throttled;
-            }
+            individual.AddRange(await RunBatchesAsync(list, pending, MarkDone, cancellationToken).ConfigureAwait(false));
         }
 
         if (individual.Count > 0)
@@ -388,51 +391,91 @@ public sealed class GraphTodoReader
 
     private sealed record BatchRoundOutcome(List<JsonObject> Throttled, List<JsonObject> Individual, TimeSpan? RetryAfter);
 
-    private async Task<BatchRoundOutcome> RunBatchRoundAsync(
+    /// <summary>
+    /// Sends the step requests one batch at a time. Throttled sub-requests go back to the front of the queue and are
+    /// retried in a new batch after the longest Retry-After (or the backoff, whichever is longer). After a throttle the
+    /// batch size drops to <see cref="ReducedBatchSize"/> and returns to <see cref="BatchSize"/> after
+    /// <see cref="CleanBatchesToGrow"/> clean batches. Returns the tasks that need individual GETs.
+    /// </summary>
+    /// <remarks>Batches are awaited one after another, so at most <see cref="MaxBatchesInFlight"/> (1) is ever in flight.</remarks>
+    private async Task<List<JsonObject>> RunBatchesAsync(
         ListContext list, List<JsonObject> tasks, Action<int> markDone, CancellationToken cancellationToken)
     {
-        var throttled = new List<JsonObject>();
         var individual = new List<JsonObject>();
-        TimeSpan? retryAfter = null;
-        var gate = new object();
-        using var semaphore = new SemaphoreSlim(MaxBatchesInFlight);
+        var queue = new LinkedList<JsonObject>(tasks);
+        var throttleCounts = new Dictionary<JsonObject, int>(ReferenceEqualityComparer.Instance);
+        var size = BatchSize;
+        var cleanStreak = 0;
 
-        var chunks = tasks.Chunk(BatchSize).ToList();
-        var work = chunks.Select(async chunk =>
+        while (queue.Count > 0)
         {
-            await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
-            try
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_batchUnavailable)
             {
-                var outcome = await RunBatchAsync(list, chunk, markDone, cancellationToken).ConfigureAwait(false);
-                lock (gate)
+                individual.AddRange(queue);
+                break;
+            }
+
+            var chunk = new JsonObject[Math.Min(size, queue.Count)];
+            for (var i = 0; i < chunk.Length; i++)
+            {
+                chunk[i] = queue.First!.Value;
+                queue.RemoveFirst();
+            }
+
+            BatchSizesSent.Add(chunk.Length);
+            var outcome = await RunBatchAsync(list, chunk, markDone, cancellationToken).ConfigureAwait(false);
+            individual.AddRange(outcome.Individual);
+
+            if (outcome.Throttled.Count == 0)
+            {
+                cleanStreak++;
+                if (size < BatchSize && cleanStreak >= CleanBatchesToGrow)
                 {
-                    throttled.AddRange(outcome.Throttled);
-                    individual.AddRange(outcome.Individual);
-                    if (outcome.RetryAfter is { } r && (retryAfter is null || r > retryAfter))
-                    {
-                        retryAfter = r;
-                    }
+                    size = BatchSize;
+                }
+
+                continue;
+            }
+
+            size = ReducedBatchSize;
+            cleanStreak = 0;
+            var round = 0;
+            var retry = new List<JsonObject>();
+            foreach (var task in outcome.Throttled)
+            {
+                var count = throttleCounts.GetValueOrDefault(task) + 1;
+                throttleCounts[task] = count;
+                round = Math.Max(round, count);
+                if (count >= MaxThrottleRounds)
+                {
+                    task["checklistItems"] = new JsonArray();
+                    AddStepsError(list, task, $"Graph kept throttling the steps request after {MaxThrottleRounds} attempts.");
+                    markDone(1);
+                }
+                else
+                {
+                    retry.Add(task);
                 }
             }
-            finally
+
+            // Throttled items go first, in their original order, so they are retried in the next batch.
+            for (var i = retry.Count - 1; i >= 0; i--)
             {
-                semaphore.Release();
+                queue.AddFirst(retry[i]);
             }
-        }).ToList();
 
-        await Task.WhenAll(work).ConfigureAwait(false);
-
-        // Keep the original order so retries and fallbacks are deterministic.
-        var order = new Dictionary<JsonObject, int>(ReferenceEqualityComparer.Instance);
-        for (var i = 0; i < tasks.Count; i++)
-        {
-            order[tasks[i]] = i;
+            if (queue.Count > 0)
+            {
+                await WaitForThrottleAsync(ThrottleDelay(outcome.RetryAfter, round - 1), cancellationToken).ConfigureAwait(false);
+            }
         }
 
-        throttled.Sort((a, b) => order[a].CompareTo(order[b]));
-        individual.Sort((a, b) => order[a].CompareTo(order[b]));
-        return new BatchRoundOutcome(throttled, individual, retryAfter);
+        return individual;
     }
+
+    /// <summary>Sizes of the step batches sent in the last run, in order. For tests and diagnostics.</summary>
+    internal List<int> BatchSizesSent { get; } = new();
 
     private async Task<BatchRoundOutcome> RunBatchAsync(
         ListContext list, JsonObject[] chunk, Action<int> markDone, CancellationToken cancellationToken)
@@ -549,6 +592,8 @@ public sealed class GraphTodoReader
             }
         }
 
+        // Keep the batch order so retries are deterministic, whatever order Graph answered in.
+        throttled.Sort((a, b) => Array.IndexOf(chunk, a).CompareTo(Array.IndexOf(chunk, b)));
         return new BatchRoundOutcome(throttled, [], retryAfter);
     }
 
@@ -750,11 +795,13 @@ public sealed class GraphTodoReader
     /// </summary>
     private async Task<string> SendAsync(Func<HttpRequestMessage> createRequest, string url, CancellationToken cancellationToken)
     {
-        for (var attempt = 0; ; attempt++)
+        var throttles = 0;
+        var failures = 0;
+        while (true)
         {
             HttpStatusCode? status = null;
-            TimeSpan delay;
             Exception? failure = null;
+            TimeSpan? retryAfter = null;
             try
             {
                 using var request = createRequest();
@@ -786,9 +833,7 @@ public sealed class GraphTodoReader
                     throw new GraphRequestException(text, status, errorCode);
                 }
 
-                delay = status is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable
-                    ? RetryAfterOf(response) ?? Backoff(attempt)
-                    : Backoff(attempt);
+                retryAfter = RetryAfterOf(response);
             }
             catch (GraphRequestException)
             {
@@ -803,10 +848,24 @@ public sealed class GraphTodoReader
                 // Network failure, or an HttpClient timeout (not the caller's cancellation).
                 failure = ex;
                 status = null;
-                delay = Backoff(attempt);
             }
 
-            if (attempt >= MaxRetries)
+            if (status is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable)
+            {
+                // Patient policy: Graph asked us to slow down.
+                if (throttles >= MaxThrottleRounds)
+                {
+                    throw new GraphRequestException(
+                        $"Microsoft Graph kept throttling the request ({(int)status.Value} {status}) after {MaxThrottleRounds} attempts: {DescribeUrl(url)}. Try again later.",
+                        status);
+                }
+
+                await WaitForThrottleAsync(ThrottleDelay(retryAfter, throttles), cancellationToken).ConfigureAwait(false);
+                throttles++;
+                continue;
+            }
+
+            if (failures >= MaxRetries)
             {
                 var reason = failure is not null
                     ? $"a network error ({failure.Message})"
@@ -817,7 +876,36 @@ public sealed class GraphTodoReader
                     inner: failure);
             }
 
-            await _delay(Clamp(delay), cancellationToken).ConfigureAwait(false);
+            await _delay(Clamp(Backoff(failures)), cancellationToken).ConfigureAwait(false);
+            failures++;
+        }
+    }
+
+    /// <summary>max(Retry-After, backoff), capped at <see cref="MaxThrottleDelay"/>.</summary>
+    internal static TimeSpan ThrottleDelay(TimeSpan? retryAfter, int attempt)
+    {
+        var backoff = Backoff(Math.Max(attempt, 0));
+        var value = retryAfter is { } r && r > backoff ? r : backoff;
+        return value > MaxThrottleDelay ? MaxThrottleDelay : value < TimeSpan.Zero ? TimeSpan.Zero : value;
+    }
+
+    /// <summary>Waits after a 429/503 and reports the wait, so a long throttle does not look like a hang.</summary>
+    private async Task WaitForThrottleAsync(TimeSpan delay, CancellationToken cancellationToken)
+    {
+        var seconds = Math.Max(1, (int)Math.Ceiling(delay.TotalSeconds));
+        var before = _lastProgress;
+        _progress?.Report(before with { WaitingSeconds = seconds });
+        await _delay(delay, cancellationToken).ConfigureAwait(false);
+        _progress?.Report(before with { WaitingSeconds = 0 });
+    }
+
+    /// <summary>Remembers the last progress so throttle waits can be reported with their context.</summary>
+    private sealed class ProgressRelay(GraphTodoReader owner) : IProgress<ReadProgress>
+    {
+        public void Report(ReadProgress value)
+        {
+            owner._lastProgress = value;
+            owner._progress?.Report(value);
         }
     }
 

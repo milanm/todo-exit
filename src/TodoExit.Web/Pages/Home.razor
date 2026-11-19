@@ -393,6 +393,11 @@
             var list = p.ListsTotal > 0
                 ? $"list {Math.Min(p.ListsDone + 1, p.ListsTotal)} of {p.ListsTotal}{(p.CurrentList is null ? "" : $" ({p.CurrentList})")}"
                 : "your lists";
+            if (p.IsWaiting)
+            {
+                return $"Microsoft Graph asked us to slow down. Waiting {p.WaitingSeconds} seconds before continuing with {list}.";
+            }
+
             return p.Phase switch
             {
                 ReadPhase.Lists => "Reading your lists...",
