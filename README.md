@@ -13,7 +13,7 @@ There are two ways to run it:
 
 | File | What it is |
 |---|---|
-| `archive.json` | The raw Microsoft Graph data for every list, task, step and attachment record. Nothing is dropped. Keep this file even if you use one of the other formats. |
+| `archive.json` | The raw Microsoft Graph data for every list, task, step and attachment record. Nothing Graph returned is dropped. Keep this file even if you use one of the other formats. |
 | `markdown/<list>.md` | One readable Markdown file per list, with checkboxes, steps, notes, links and due dates. |
 | `todoist/<list>.csv` | One CSV file per list in Todoist's project import format. Lists with more than 300 tasks are split into `<list> - part 1.csv`, `<list> - part 2.csv` and so on, because Todoist accepts at most 300 tasks per import. |
 | `tasks.csv` | One spreadsheet row per task across all lists, open and completed. Saved as UTF-8 with a byte order mark so Excel shows non-English characters correctly. |
@@ -33,7 +33,7 @@ There are two ways to run it:
 | Importance | kept | high is marked | high becomes priority 1, others priority 4 | kept |
 | Categories | kept | kept as `#tags` | kept as `@labels` | kept |
 | Completed tasks | kept | kept under "Completed" | skipped by default; `--include-completed` writes them as open tasks | kept |
-| Linked resources (for example a flagged email) | kept | kept as links | added to the description | kept |
+| Linked resources (for example a flagged email) | kept when Graph returns them (see below) | kept as links | added to the description | kept |
 | Attachments | which tasks have attachments; file name, size and type when Graph allows it (see below) | marked, with names when known | not carried | file names when known |
 | List sharing and members | kept as Graph returned it | not carried | not carried | not carried |
 
@@ -45,7 +45,7 @@ The report lists each loss by format, list and task, so you can fix the importan
 
 ### When Microsoft Graph cannot return something
 
-Sometimes Graph itself cannot return a task. On one real account, a single corrupt task made every page that contained it come back broken: Graph sent most of the task, failed partway through, and stopped. todo-exit then narrows the page down until only that task is left and reads every other task normally. For the broken task it keeps every property Graph managed to send before it failed, marks the task with `"todoExitPartial": true`, and still reads its steps. The report names the property Graph failed on and the error Graph gave. If Graph failed before sending the task's id, the task is skipped and the report gives its position in the list.
+Sometimes Graph itself cannot return a task. On one real account with about 12,700 tasks, 18 came back broken, all at the `linkedResources` property: Graph sent most of each task, failed partway through, and stopped. Every page that contained one of them was invalid JSON. todo-exit narrows such a page down until only the broken task is left and reads every other task normally. For the broken task it keeps every property Graph managed to send before it failed, marks the task with `"todoExitPartial": true`, and keeps its steps. The report names the property Graph failed on and the error Graph gave. If Graph failed before sending the task's id, the task is skipped and the report gives its position in the list.
 
 All of this is recorded in a "Could not be read from Microsoft Graph" section at the top of `report.md`, and in `readErrors` in `report.json`. It applies to every format, including the JSON archive. The kinds are:
 
@@ -61,12 +61,14 @@ Kinds that apply to many tasks at once (completed tasks left out, attachments, c
 
 ## Privacy
 
-- todo-exit asks for one permission: `Tasks.Read`. It can read your tasks. It cannot change or delete them.
+- todo-exit asks for one permission to your data: `Tasks.Read`. It can read your tasks. It cannot change or delete them.
+- Signing in also uses the standard sign-in scopes (`openid`, `profile`, `offline_access`), so Microsoft's consent screen can list your basic profile and keeping access next to the tasks permission. Keeping access is what lets a long read renew its token. The only profile data todo-exit uses is the account name the web app shows after sign-in.
 - Every request it makes is read-only. Steps come with the task pages. Attachment details (and the extra step check of `--verify-steps`) are read through Graph's batch endpoint (`POST /$batch`), which bundles up to 20 read requests into one call. The batch contains only reads.
-- With read-only access, Graph refuses to list attachments on personal accounts (observed November 2026). The archive then records which tasks have attachments but not the file names. todo-exit does not ask for write access to get around this.
-- The web app runs entirely in your browser. The only network requests it makes are to Microsoft Graph, from your browser. Your tasks are not sent to any other server.
-- The command-line tool runs on your computer and talks only to Microsoft Graph.
-- Neither tool stores your sign-in. The CLI keeps the access token in memory only, sends it to `graph.microsoft.com` only, and never prints it or writes it to disk.
+- It does not ask for write access. That is why attachment file names are missing on personal accounts (see above).
+- The web app runs entirely in your browser. It talks to Microsoft only: the sign-in service to sign you in, and Microsoft Graph to read your tasks. Your tasks are sent to no other server.
+- The command-line tool runs on your computer and talks to the same two Microsoft services, nothing else.
+- The command-line tool keeps your sign-in in memory only. It sends the access token to `graph.microsoft.com` only, and never prints it or writes it to disk.
+- The web app keeps your sign-in in the browser tab's session storage, which is how Microsoft's sign-in library works. It is gone when you sign out or close the tab.
 - The source code is in this repository, so you can check all of the above.
 
 ## Run the command-line tool
@@ -115,7 +117,7 @@ todo-exit export    [--token <t> | --token-file <path> | --from-archive <file>] 
 - `--from-archive` reads an `archive.json` written earlier, so you can export again later without signing in.
 - `--formats` defaults to all four. `report.md` and `report.json` are always written.
 - `--timezone` sets the zone used for due dates and reminders. It defaults to your computer's zone. Use the zone you used To Do in, otherwise due dates can shift by a day.
-- `--verify-steps` asks Graph for the steps of every task that came without steps, to double-check that it really has none. It is slow on a large account and normally not needed. If it finds steps anywhere, the summary line and the archive say how many.
+- `--verify-steps` asks Graph for the steps of every task that came without steps, to double-check that it has none. It is slow on a large account and normally not needed. If it finds steps anywhere, the summary line and the archive say how many.
 - While reading, the tool shows progress on one line, and when it is done it prints how many lists and tasks it read, how many read errors there were, and how long it took.
 - Exit codes: 0 on success, 1 for a usage error, 2 when the export fails, 3 when the read was interrupted and a partial archive was saved.
 
@@ -127,7 +129,9 @@ A partial archive also works with `--from-archive`. The report then starts with 
 
 ### Large accounts
 
-Steps come with the tasks, so the read is mostly paging: an account with about 12,700 tasks exported in about 5 minutes. When Graph asks todo-exit to slow down, it waits and shows the wait on the progress line. Use `--verify-steps` only if you want to double-check the steps; it adds one request per task without steps.
+Steps come with the tasks, so the read is mostly paging: an account with about 12,700 tasks exported in a little over 3 minutes. When Graph asks todo-exit to slow down, it waits and shows the wait on the progress line. Use `--verify-steps` only if you want to double-check the steps; it adds one request per task without steps.
+
+### Install as a .NET tool
 
 You can also install it as a .NET tool from a local build:
 
@@ -150,7 +154,7 @@ Todoist cannot undo a CSV import. Try one small list first and check the result 
 
 A Todoist project holds at most 300 tasks. A list with more tasks is split into `<list> - part 1.csv`, `<list> - part 2.csv` and so on, and each part must be imported into its own project; name the projects after the files, for example "Work - part 1". The free Todoist plan allows 5 projects, so a large account may need a paid plan or fewer lists. `report.md` lists every split list.
 
-After import, Todoist turns plain web addresses in task names and descriptions into titled links. The address itself is unchanged; this is Todoist's behavior, not a bug in todo-exit.
+After import, Todoist turns plain web addresses in task names and descriptions into titled links. Todoist does this on its own, and the address itself is unchanged.
 
 ## Run the web app locally
 
@@ -182,13 +186,33 @@ docs/                     app registration guide
 
 The archive is the source of truth. The reader saves raw Graph JSON, and every other format is generated from that file. Properties the parser does not know about stay in the archive unchanged. When something could not be read, the archive has an extra `readNotes` property listing it.
 
-Known Graph behavior: task pages include `checklistItems` only on tasks that have steps, and leave it out on tasks that have none; `$expand=checklistItems` changes nothing. Graph rejects `$select` on To Do tasks with 400 Bad Request when it names `title` or `status`, and ignores it otherwise, so todo-exit never uses it.
+## What has been tested
+
+As of 2026-11-19:
+
+- One personal Microsoft account with 14 lists and about 12,700 tasks, read by the command-line tool on Windows and by the web app run locally. Both gave the same counts.
+- The Todoist CSV files: three of them (49, 101 and 294 tasks) were imported into a free Todoist account and read back through Todoist's API. Sub-tasks, priorities, labels, descriptions and dates matched.
+- The repeat-rule phrases in `RecurrenceText.cs`: Todoist accepted every phrase the tool can write as a recurring task with the right next date.
+- The unit tests run on Linux and Windows on every push.
+
+Not tested yet: work and school accounts, `--resume` against the real Graph (it is covered by tests against a fake one), and the hosted web app.
+
+### Microsoft Graph behavior observed
+
+These are observations from that one account in November 2026, and they shaped the reader:
+
+- Task pages include `checklistItems` only on tasks that have steps. `$expand=checklistItems` changes nothing.
+- Graph rejects `$select` on To Do tasks with 400 Bad Request when it names `title` or `status`, and ignores it otherwise, so todo-exit never uses it.
+- Graph answers 401 accessDenied for attachment lists with a `Tasks.Read` token.
+- 18 tasks failed with InternalServerError while Graph was writing `linkedResources`, and no task with linked resources came back whole. That suggests Graph fails on every task that has them, but one account cannot prove it.
+- Several batch requests in parallel are throttled. One batch already uses the four concurrent requests an account is allowed.
 
 ## Roadmap
 
 - Phase 2: transfer tasks directly to Todoist through its API, including completed tasks and reminders where the API allows.
-- The repeat-rule phrases in `RecurrenceText.cs` and the CSV template were checked against a live Todoist account on 2026-11-19: three imported files (up to 294 tasks) came back with matching sub-tasks, priorities, labels, descriptions and dates, and every phrase imported as a recurring task with the right next date. Rules like "the last Sunday of October" (`relativeYearly`) are still written as `every year` with a note in the report.
-- A hosted version of the web app.
+- Ready-made executables for Windows, macOS and Linux, so the command-line tool does not need the .NET SDK.
+- Rules like "the last Sunday of October" (`relativeYearly`) are still written as `every year` with a note in the report.
+- The hosted web app at https://milanm.github.io/todo-exit/.
 
 ## Not affiliated
 

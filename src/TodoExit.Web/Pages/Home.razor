@@ -34,7 +34,8 @@
     <ul class="plain">
         <li>The app asks Microsoft for read-only access to your tasks (the Tasks.Read permission). It cannot change or delete anything.</li>
         <li>It runs entirely in your browser. There is no todo-exit server.</li>
-        <li>Your browser talks only to Microsoft Graph to read your tasks. Nothing is sent to any other server.</li>
+        <li>Your browser talks to Microsoft only: its sign-in service to sign you in, and Microsoft Graph to read your tasks. Your tasks are sent to no other server.</li>
+        <li>Your sign-in stays in this browser tab and is gone when you sign out or close the tab.</li>
         <li>The files are built on your device and saved by your browser.</li>
         <li>The source code is open: <a href="@AppSettings.RepositoryUrl">@AppSettings.RepositoryUrl</a>.</li>
     </ul>
