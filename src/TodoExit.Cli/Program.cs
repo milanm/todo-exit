@@ -18,8 +18,10 @@ public static class Program
 
     internal const string PartialArchiveFileName = "archive.partial.json";
 
+    internal const string UsageText = Usage;
+
     private const string Usage = """
-        todo-exit: export Microsoft To Do to files
+        todo-exit: export Microsoft To Do to files, or transfer an export to Todoist
 
         Usage:
           todo-exit inventory [--token <t> | --token-file <path> | --from-archive <file>] [--timezone <IANA id>]
@@ -27,6 +29,9 @@ public static class Program
           todo-exit export    [--token <t> | --token-file <path> | --from-archive <file>] --out <dir>
                               [--formats json,markdown,todoist,csv] [--include-completed] [--timezone <IANA id>]
                               [--verify-steps] [--resume <file>] [--client-id <guid>] [--tenant <id>]
+          todo-exit transfer  --from-archive <file> [--out <dir>] [--lists <a,b>] [--include-completed]
+                              [--timezone <IANA id>] [--todoist-token <t> | --todoist-token-file <path>]
+                              [--allow-duplicate-names] [--yes] [--resume <state file>]
 
         Options:
           (no token)            Without --token, --token-file, TODOEXIT_TOKEN or --from-archive, the tool signs you in:
@@ -45,7 +50,19 @@ public static class Program
           --timezone <id>       Time zone for dates, e.g. Europe/Belgrade. Default: this computer's zone.
           -h, --help            Show this help.
 
-        Exit codes: 0 success, 1 usage error, 2 failure, 3 interrupted (partial archive saved).
+        Transfer to Todoist (reads an archive.json, no Microsoft sign-in):
+          Without --yes it only prints the plan and writes nothing. With a Todoist token the plan also checks
+          the account (reads only): limits, free projects, existing project names.
+          --todoist-token <t>   Your Todoist API token (Todoist Settings > Integrations > Developer). Also TODOIST_TOKEN.
+          --todoist-token-file <path>  Read the Todoist token from a file.
+          --lists <a,b>         Transfer only these lists (comma-separated, exact names).
+          --include-completed   Also transfer completed tasks and checked steps, completed in Todoist with their date.
+          --allow-duplicate-names  Create projects even if the account already has projects with the same names.
+          --yes                 Write to Todoist. Creates one project per list; never changes existing data.
+          --out <dir>           Where todoist-transfer-state.json and todoist-transfer-report.md/.json go. Default: .
+          --resume <file>       Continue a transfer from its todoist-transfer-state.json (with the same archive).
+
+        Exit codes: 0 success, 1 usage error, 2 failure, 3 interrupted (partial archive or transfer state saved).
         """;
 
     public static async Task<int> Main(string[] args)
@@ -53,7 +70,7 @@ public static class Program
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
         {
-            // Ctrl+C stops the read; what was read is saved as a partial archive.
+            // Ctrl+C stops the read (or the transfer); what was done is saved.
             e.Cancel = true;
             cts.Cancel();
         };
@@ -66,8 +83,15 @@ public static class Program
     /// <param name="clock">Clock for token expiry; tests inject one.</param>
     internal static async Task<int> RunAsync(
         string[] args, TextWriter stdout, TextWriter stderr, HttpMessageHandler? handler, CancellationToken cancellationToken,
-        Func<TimeSpan, CancellationToken, Task>? delay = null, string? authorityBase = null, Func<DateTimeOffset>? clock = null)
+        Func<TimeSpan, CancellationToken, Task>? delay = null, string? authorityBase = null, Func<DateTimeOffset>? clock = null,
+        Func<string, string?>? environment = null)
     {
+        if (args.Length > 0 && args[0] == "transfer")
+        {
+            return await TransferCommand.RunAsync(args, stdout, stderr, handler, cancellationToken, delay,
+                clock ?? (() => DateTimeOffset.UtcNow), environment ?? Environment.GetEnvironmentVariable);
+        }
+
         Options options;
         try
         {
@@ -236,7 +260,7 @@ public static class Program
         return document;
     }
 
-    private static async Task<TodoArchiveDocument> LoadFileAsync(string path, CancellationToken cancellationToken)
+    internal static async Task<TodoArchiveDocument> LoadFileAsync(string path, CancellationToken cancellationToken)
     {
         if (!File.Exists(path))
         {

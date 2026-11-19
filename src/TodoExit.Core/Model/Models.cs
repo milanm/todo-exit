@@ -74,7 +74,11 @@ public sealed record TodoItem
     public bool AttachmentNamesUnknown => HasAttachments && Attachments.Count == 0;
 }
 
-public sealed record Step(string Title, bool IsChecked);
+public sealed record Step(string Title, bool IsChecked)
+{
+    /// <summary>When the step was checked, in the target time zone. Graph's checkedDateTime; null when absent.</summary>
+    public DateTime? CheckedAt { get; init; }
+}
 
 public sealed record LinkedResource(string? DisplayName, string? ApplicationName, string? WebUrl);
 

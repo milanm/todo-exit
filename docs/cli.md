@@ -67,3 +67,27 @@ dotnet pack src/TodoExit.Cli -c Release -o ./artifacts/nupkg
 dotnet tool install --global todo-exit --add-source ./artifacts/nupkg
 todo-exit export --from-archive archive.json --out ./todo-export
 ```
+
+## Transfer to Todoist
+
+`transfer` writes an archive into your Todoist account through the Todoist API, so you skip the CSV import. It reads `archive.json` and needs no Microsoft sign-in.
+
+```
+todo-exit transfer --from-archive ./todo-export/archive.json --todoist-token-file token.txt
+```
+
+That prints a plan and writes nothing: which projects it would create, how many tasks and sub-tasks, what will not carry over, and whether it fits your Todoist plan. Add `--yes` to transfer.
+
+Your Todoist API token is in Todoist under Settings, Integrations, Developer. Pass it with `--todoist-token-file`, `--todoist-token` or the `TODOIST_TOKEN` environment variable. The tool sends it to `api.todoist.com` only and never prints or stores it.
+
+What it does:
+
+- One Todoist project per To Do list. Open steps become sub-tasks. Priority, labels, notes, due dates and repeat rules are carried as in the CSV.
+- It never adds to, changes or deletes anything that already exists in your account. If a project with the same name exists, it stops before writing.
+- A list with more tasks than one project allows is split into `part` projects. If your plan has too few free projects, it tells you what fits, and you choose lists with `--lists "Work,Home"`.
+- `--include-completed` also transfers completed tasks and checked steps, completed in Todoist with their original date. On a large account this takes long: about 15 seconds per 100 items.
+- Reminders are added when your Todoist plan has reminders. Otherwise the report lists them.
+
+If the transfer stops, it saves `todoist-transfer-state.json` in `--out` and exits with code 3. Continue with `--resume <that file> --yes` and the same archive. A resumed transfer does not create duplicates, also when the last request reached Todoist but its answer was lost.
+
+`todoist-transfer-report.md` lists what was created and what was not carried.

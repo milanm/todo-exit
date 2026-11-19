@@ -87,7 +87,7 @@ public static partial class ArchiveParser
             CreatedAt = ParseInstant(Str(task, "createdDateTime"), zone),
             ModifiedAt = ParseInstant(Str(task, "lastModifiedDateTime"), zone),
             Categories = StringArray(task["categories"]),
-            Steps = ParseSteps(task["checklistItems"]),
+            Steps = ParseSteps(task["checklistItems"], zone),
             Recurrence = ParseRecurrence(task["recurrence"] as JsonObject),
             LinkedResources = ParseLinkedResources(task["linkedResources"]),
             Attachments = ParseAttachments(task["attachments"]),
@@ -163,7 +163,7 @@ public static partial class ArchiveParser
         return DateTime.SpecifyKind(TimeZoneInfo.ConvertTime(instant, target).DateTime, DateTimeKind.Unspecified);
     }
 
-    private static IReadOnlyList<Step> ParseSteps(JsonNode? node)
+    private static IReadOnlyList<Step> ParseSteps(JsonNode? node, TimeZoneInfo zone)
     {
         if (node is not JsonArray array)
         {
@@ -174,7 +174,7 @@ public static partial class ArchiveParser
         foreach (var item in array.OfType<JsonObject>())
         {
             var title = (Str(item, "displayName") ?? string.Empty).Trim();
-            steps.Add(new Step(title, Bool(item, "isChecked") ?? false));
+            steps.Add(new Step(title, Bool(item, "isChecked") ?? false) { CheckedAt = ParseInstant(Str(item, "checkedDateTime"), zone) });
         }
 
         return steps;

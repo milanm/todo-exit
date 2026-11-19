@@ -19,7 +19,7 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
     public const string MarkdownFileName = "report.md";
 
     private static readonly string[] FormatOrder =
-        [ExportFormatNames.Todoist, ExportFormatNames.Markdown, ExportFormatNames.Csv, ExportFormatNames.Json];
+        [ExportFormatNames.TodoistApi, ExportFormatNames.Todoist, ExportFormatNames.Markdown, ExportFormatNames.Csv, ExportFormatNames.Json];
 
     public byte[] ToJsonBytes()
     {
@@ -105,10 +105,13 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
         return stream.ToArray();
     }
 
-    public string ToMarkdown()
+    public string ToMarkdown() => ToMarkdown("todo-exit report");
+
+    /// <param name="title">The level-1 heading.</param>
+    public string ToMarkdown(string title)
     {
         var sb = new StringBuilder();
-        sb.Append("# todo-exit report\n\n");
+        sb.Append("# ").Append(title).Append("\n\n");
         if (ReadNotes.Interrupted)
         {
             sb.Append("**This archive is incomplete.** The read from Microsoft Graph stopped before it finished: ")
@@ -160,7 +163,7 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
                 continue;
             }
 
-            AppendKindTable(sb, items.GroupBy(l => l.Kind).Select(g => (g.Key, g.Sum(l => l.Count))));
+            AppendKindTable(sb, items.GroupBy(l => l.Kind).Select(g => (g.Key, g.Sum(l => l.Count))), format);
             var perTask = items.Where(l => !l.Aggregated).ToList();
             AppendItems(sb, perTask.Select(l => (l.List, l.Task is null ? null : $"**{EscapeInline(l.Task)}**: ", l.Message, l.Kind)).ToList());
         }
@@ -187,13 +190,13 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
             e.Kind)).ToList());
     }
 
-    private static void AppendKindTable(StringBuilder sb, IEnumerable<(string Kind, int Count)> rows)
+    private static void AppendKindTable(StringBuilder sb, IEnumerable<(string Kind, int Count)> rows, string? format = null)
     {
         sb.Append("| Kind | Count | What it means |\n|---|---:|---|\n");
         foreach (var (kind, count) in rows.OrderByDescending(r => r.Count).ThenBy(r => r.Kind, StringComparer.Ordinal))
         {
             sb.Append("| ").Append(kind).Append(" | ").Append(count.ToString("N0", CultureInfo.InvariantCulture))
-                .Append(" | ").Append(LossCatalog.Meaning(kind)).Append(" |\n");
+                .Append(" | ").Append(format is null ? LossCatalog.Meaning(kind) : LossCatalog.Meaning(kind, format)).Append(" |\n");
         }
 
         sb.Append('\n');
@@ -400,6 +403,7 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
         ExportFormatNames.Markdown => Formats.HasFlag(ExportFormats.Markdown),
         ExportFormatNames.Todoist => Formats.HasFlag(ExportFormats.Todoist),
         ExportFormatNames.Csv => Formats.HasFlag(ExportFormats.Csv),
+        ExportFormatNames.TodoistApi => Formats.HasFlag(ExportFormats.TodoistApi),
         _ => false,
     };
 
@@ -408,6 +412,7 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
         ExportFormatNames.Todoist => "Todoist CSV",
         ExportFormatNames.Markdown => "Markdown",
         ExportFormatNames.Csv => "Generic CSV (tasks.csv)",
+        ExportFormatNames.TodoistApi => "Todoist (direct transfer)",
         _ => format,
     };
 

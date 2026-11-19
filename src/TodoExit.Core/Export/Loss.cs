@@ -13,6 +13,9 @@ public enum ExportFormats
     Todoist = 4,
     Csv = 8,
     All = Json | Markdown | Todoist | Csv,
+
+    /// <summary>Direct transfer through the Todoist API. Not a file format and not part of <see cref="All"/>.</summary>
+    TodoistApi = 16,
 }
 
 public static class ExportFormatNames
@@ -21,6 +24,9 @@ public static class ExportFormatNames
     public const string Markdown = "markdown";
     public const string Todoist = "todoist";
     public const string Csv = "csv";
+
+    /// <summary>Losses of the direct transfer through the Todoist API. Not accepted by <see cref="TryParse"/>.</summary>
+    public const string TodoistApi = "todoist-api";
 
     /// <summary>Parses "json,markdown,todoist,csv". Returns false and the offending name on error.</summary>
     public static bool TryParse(string? value, out ExportFormats formats, out string? invalid)
@@ -71,6 +77,18 @@ public static class LossKinds
 
     /// <summary>Informational: the list had more than 300 task rows and was split into several CSV files.</summary>
     public const string ListSplit = "list-split";
+
+    /// <summary>Todoist API transfer: Todoist refused a command for this task.</summary>
+    public const string TodoistError = "todoist-error";
+
+    /// <summary>Todoist API transfer: not created because its project or parent task could not be created.</summary>
+    public const string ParentNotCreated = "parent-not-created";
+
+    /// <summary>Todoist API transfer: the task was only partly readable from Graph and was transferred as it is.</summary>
+    public const string PartialTask = "partial-task";
+
+    /// <summary>Todoist API transfer: the list was not chosen with --lists.</summary>
+    public const string ListNotSelected = "list-not-selected";
 }
 
 /// <summary>
@@ -110,6 +128,10 @@ public static class LossCatalog
         LossKinds.StartDateNotCarried => "Todoist has no start date, so start dates are not carried.",
         LossKinds.StepOverflow => "A task had more steps than one Todoist import allows; the extra steps were not written.",
         LossKinds.ListSplit => "This list has more than 300 tasks to import. Import each part into its own Todoist project.",
+        LossKinds.TodoistError => "Todoist refused to create or complete this item; the error is shown with it.",
+        LossKinds.ParentNotCreated => "Not created because its project or parent task could not be created.",
+        LossKinds.PartialTask => "The task was only partly readable from Microsoft Graph; it was transferred with what the archive has.",
+        LossKinds.ListNotSelected => "The list was not chosen for this transfer.",
         ReadErrorKinds.TaskUnreadable => "Graph could not return the task at all; it is missing from every format.",
         ReadErrorKinds.TaskPartial => "Graph failed partway through the task; it is kept with the properties Graph sent.",
         ReadErrorKinds.StepsUnreadable => "The steps of the task could not be read.",
@@ -118,9 +140,23 @@ public static class LossCatalog
         _ => kind,
     };
 
+    /// <summary>Meaning in the context of one format. The Todoist API transfer words some kinds differently.</summary>
+    public static string Meaning(string kind, string format) => format != ExportFormatNames.TodoistApi
+        ? Meaning(kind)
+        : kind switch
+        {
+            LossKinds.CompletedSkipped => "Completed tasks are left out unless you choose to transfer them.",
+            LossKinds.CheckedStepSkipped => "Checked steps are left out unless you choose to transfer completed items.",
+            LossKinds.ReminderNotCarried => "Reminders that were not added: your Todoist plan has no reminders, the time had passed, or the task is completed. Set them again in Todoist if needed.",
+            LossKinds.RecurrenceApproximated => "The repeat rule was written as the closest Todoist phrase; check these tasks in Todoist.",
+            LossKinds.StepOverflow => "A task had more steps than one Todoist project allows; the extra steps were not transferred.",
+            LossKinds.ListSplit => "This list has more tasks than one Todoist project allows, so it was split into several projects.",
+            _ => Meaning(kind),
+        };
+
     /// <summary>
-    /// Folds bulk kinds into one entry per (format, list, kind). Exception: Todoist reminders and attachments of OPEN
-    /// tasks stay per task, because the user re-adds those by hand. Order follows the first occurrence.
+    /// Folds bulk kinds into one entry per (format, list, kind). Exception: Todoist (CSV and API) reminders and
+    /// attachments of OPEN tasks stay per task, because the user re-adds those by hand. Order follows the first occurrence.
     /// </summary>
     public static IReadOnlyList<Loss> Aggregate(IEnumerable<Loss> losses)
     {
@@ -129,7 +165,7 @@ public static class LossCatalog
         var namesUnknown = new HashSet<int>();
         foreach (var loss in losses)
         {
-            var perTaskTodoist = loss.Format == ExportFormatNames.Todoist
+            var perTaskTodoist = loss.Format is ExportFormatNames.Todoist or ExportFormatNames.TodoistApi
                 && loss.Kind is LossKinds.ReminderNotCarried or LossKinds.AttachmentNotCarried
                 && loss.TaskIsOpen;
             if (loss.Aggregated || !BulkKinds.Contains(loss.Kind) || perTaskTodoist)

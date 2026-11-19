@@ -1,5 +1,4 @@
 using System.Text;
-using System.Text.RegularExpressions;
 using TodoExit.Core.Model;
 
 namespace TodoExit.Core.Export;
@@ -10,19 +9,13 @@ namespace TodoExit.Core.Export;
 /// an empty PRIORITY imports as p1 so it is always written, INDENT 1 = task and 2 = sub-task,
 /// at most 300 tasks per imported project.
 /// </summary>
-public static partial class TodoistCsvExporter
+public static class TodoistCsvExporter
 {
     public const string Header = "TYPE,CONTENT,DESCRIPTION,PRIORITY,INDENT,AUTHOR,RESPONSIBLE,DATE,DATE_LANG,TIMEZONE,DURATION,DURATION_UNIT";
     public const int MaxTasksPerFile = 300;
 
-    [GeneratedRegex(@"\s+")]
-    private static partial Regex Whitespace();
-
-    [GeneratedRegex(@"[\r\n\t]+")]
-    private static partial Regex LineBreaksAndTabs();
-
     /// <summary>CONTENT must stay on one line: runs of CR, LF and tab become a single space.</summary>
-    internal static string OneLine(string text) => LineBreaksAndTabs().Replace(text, " ");
+    internal static string OneLine(string text) => TodoistMapping.OneLine(text);
 
     private sealed record Row(string Content, string Description, int Priority, int Indent, string Date, string TaskTitle);
 
@@ -102,64 +95,16 @@ public static partial class TodoistCsvExporter
 
     private static Row TaskRow(TaskList list, TodoItem task, ICollection<Loss> losses)
     {
-        var content = new StringBuilder(OneLine(task.Title));
-        foreach (var category in task.Categories)
+        var fields = TodoistMapping.Map(list, task, ExportFormatNames.Todoist, losses, withRecurrence: true,
+            reminder => $"Reminder at {Fmt.DateTime(reminder)} is not carried. Todoist reminders cannot be imported from CSV.");
+        var content = new StringBuilder(fields.Content);
+        foreach (var label in fields.Labels)
         {
-            content.Append(" @").Append(Whitespace().Replace(category.Trim(), "_"));
+            content.Append(" @").Append(label);
         }
 
-        var description = new List<string>();
-        if (task.Notes is { } notes)
-        {
-            description.Add(notes);
-        }
-
-        foreach (var link in task.LinkedResources)
-        {
-            var name = link.DisplayName ?? link.ApplicationName ?? "link";
-            description.Add(string.IsNullOrWhiteSpace(link.WebUrl) ? $"Link: {name}" : $"Link: {name} {link.WebUrl}");
-        }
-
-        var date = string.Empty;
-        if (task.Recurrence is { } recurrence)
-        {
-            var (text, caveat) = RecurrenceText.Describe(recurrence, task.DueDate, startingFrom: task.DueDate);
-            if (caveat is not null)
-            {
-                losses.Add(Loss(list, task, LossKinds.RecurrenceApproximated,
-                    $"Recurrence written as \"{(text.Length > 0 ? text : "(none)")}\": {caveat}"));
-            }
-
-            if (text.Length > 0)
-            {
-                date = text;
-            }
-        }
-
-        if (date.Length == 0 && task.DueDate is { } due)
-        {
-            date = Fmt.Date(due);
-        }
-
-        if (task.Reminder is { } reminder)
-        {
-            losses.Add(Loss(list, task, LossKinds.ReminderNotCarried,
-                $"Reminder at {Fmt.DateTime(reminder)} is not carried. Todoist reminders cannot be imported from CSV."));
-        }
-
-        if (task.StartDate is { } startDate)
-        {
-            losses.Add(Loss(list, task, LossKinds.StartDateNotCarried,
-                $"Start date {Fmt.Date(startDate)} is not carried."));
-        }
-
-        if (task.HasAnyAttachment)
-        {
-            losses.Add(MarkdownExporter.AttachmentLoss(ExportFormatNames.Todoist, list, task) with { TaskIsOpen = !task.IsCompleted });
-        }
-
-        var priority = task.Importance == Importance.High ? 1 : 4;
-        return new Row(content.ToString(), string.Join("\n", description), priority, 1, date, task.Title);
+        var priority = fields.HighPriority ? 1 : 4;
+        return new Row(content.ToString(), fields.Description, priority, 1, fields.Date, task.Title);
     }
 
     /// <summary>Packs blocks (a task and its sub-tasks) into files of at most 300 task rows without splitting a block.</summary>
@@ -222,5 +167,5 @@ public static partial class TodoistCsvExporter
     }
 
     private static Loss Loss(TaskList list, TodoItem task, string kind, string message) =>
-        new(ExportFormatNames.Todoist, list.Name, task.Title, kind, message) { TaskIsOpen = !task.IsCompleted };
+        TodoistMapping.Loss(ExportFormatNames.Todoist, list, task, kind, message);
 }
