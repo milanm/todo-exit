@@ -6,8 +6,8 @@ Microsoft retires the Microsoft To Do apps on June 30, 2027. Personal Microsoft 
 
 There are two ways to run it:
 
-- a command-line tool (`todo-exit`), which works today with a token from Graph Explorer
-- a web app that runs in your browser, with no server of its own
+- a command-line tool (`todo-exit`), which signs you in with your Microsoft account by itself
+- a web app that runs in your browser, with no server of its own. The web app will be published at https://milanm.github.io/todo-exit/; until then, run it locally as described below.
 
 ## What it exports
 
@@ -66,46 +66,50 @@ Kinds that apply to many tasks at once (completed tasks left out, attachments, c
 - With read-only access, Graph refuses to list attachments on personal accounts (observed November 2026). The archive then records which tasks have attachments but not the file names. todo-exit does not ask for write access to get around this.
 - The web app runs entirely in your browser. The only network requests it makes are to Microsoft Graph, from your browser. Your tasks are not sent to any other server.
 - The command-line tool runs on your computer and talks only to Microsoft Graph.
-- Neither tool stores your token. The CLI never prints it.
+- Neither tool stores your sign-in. The CLI keeps the access token in memory only, sends it to `graph.microsoft.com` only, and never prints it or writes it to disk.
 - The source code is in this repository, so you can check all of the above.
 
 ## Run the command-line tool
 
 You need the [.NET 10 SDK](https://dotnet.microsoft.com/download).
 
-### 1. Get a token from Graph Explorer
+### 1. Sign in
 
-Until the web app has a registered sign-in, the simplest way to get a read-only token is Microsoft's Graph Explorer:
+Run a command without a token and todo-exit signs you in:
 
-1. Open https://developer.microsoft.com/graph/graph-explorer and sign in with the Microsoft account that holds your tasks.
-2. Open "Modify permissions", find `Tasks.Read` and consent to it.
-3. Run the query `GET https://graph.microsoft.com/v1.0/me/todo/lists` once to check that it works.
-4. Open the "Access token" tab and copy the token.
+```
+dotnet run --project src/TodoExit.Cli -- inventory
+```
 
-The token expires after about an hour. Treat it like a password: do not paste it into chats, issues or shared files.
+It prints a web address and a short code. Open the address in any browser, enter the code, and sign in with the Microsoft account that holds your tasks. The first time, Microsoft asks you to allow read-only access to your tasks (`Tasks.Read`). The command then continues by itself. The sign-in lasts for the whole run and is renewed in the background, so a long export does not stop halfway.
 
-Save the token to a file, for example `token.txt`, or put it in the `TODOEXIT_TOKEN` environment variable.
+Options for sign-in:
+
+- `--client-id <guid>` (or the `TODOEXIT_CLIENT_ID` environment variable) uses your own app registration instead of the built-in one. A fork needs its own registration; see [docs/entra-app-registration.md](docs/entra-app-registration.md).
+- `--tenant <id>` signs in against `common` by default. Use `consumers` for personal accounts only, `organizations` for work or school accounts only, or a tenant ID or domain.
+
+Advanced: if you already have an access token with `Tasks.Read`, pass it with `--token`, `--token-file` or the `TODOEXIT_TOKEN` environment variable, and the tool skips sign-in. Such a token is not renewed and expires after about an hour.
 
 ### 2. See what is in your account
 
 ```
-dotnet run --project src/TodoExit.Cli -- inventory --token-file token.txt --timezone Europe/Belgrade
+dotnet run --project src/TodoExit.Cli -- inventory --timezone Europe/Belgrade
 ```
 
 ### 3. Export
 
 ```
-dotnet run --project src/TodoExit.Cli -- export --token-file token.txt --out ./todo-export --timezone Europe/Belgrade
+dotnet run --project src/TodoExit.Cli -- export --out ./todo-export --timezone Europe/Belgrade
 ```
 
 The full syntax:
 
 ```
-todo-exit inventory (--token <t> | --token-file <path> | --from-archive <file>) [--timezone <IANA id>]
-                    [--verify-steps] [--resume <file>] [--out <dir>]
-todo-exit export    (--token <t> | --token-file <path> | --from-archive <file>) --out <dir>
+todo-exit inventory [--token <t> | --token-file <path> | --from-archive <file>] [--timezone <IANA id>]
+                    [--verify-steps] [--resume <file>] [--out <dir>] [--client-id <guid>] [--tenant <id>]
+todo-exit export    [--token <t> | --token-file <path> | --from-archive <file>] --out <dir>
                     [--formats json,markdown,todoist,csv] [--include-completed] [--timezone <IANA id>]
-                    [--verify-steps] [--resume <file>]
+                    [--verify-steps] [--resume <file>] [--client-id <guid>] [--tenant <id>]
 ```
 
 - `--from-archive` reads an `archive.json` written earlier, so you can export again later without signing in.
@@ -117,7 +121,7 @@ todo-exit export    (--token <t> | --token-file <path> | --from-archive <file>) 
 
 ### If the read stops
 
-A token from Graph Explorer lasts about an hour, and a large account can take longer than that to read. If the token expires, Graph fails for another reason, or you press Ctrl+C, todo-exit saves everything it has read so far to `archive.partial.json` in the `--out` folder (the current folder for `inventory` without `--out`) and exits with code 3. Get a new token and run the same command with `--resume archive.partial.json`. The tool continues where it stopped and does not read finished work again. When it is done, you can delete `archive.partial.json`.
+If the sign-in can no longer be renewed, a token you passed expires, Graph fails for another reason, or you press Ctrl+C, todo-exit saves everything it has read so far to `archive.partial.json` in the `--out` folder (the current folder for `inventory` without `--out`) and exits with code 3. Run the same command with `--resume archive.partial.json`; it asks you to sign in again (or takes a new token). The tool continues where it stopped and does not read finished work again. When it is done, you can delete `archive.partial.json`.
 
 A partial archive also works with `--from-archive`. The report then starts with a note that the archive is incomplete and names the list that was in progress.
 
@@ -156,7 +160,7 @@ dotnet run --project src/TodoExit.Web
 
 Then open the URL it prints. "Try with sample data" works without any setup and loads a fictional account from `wwwroot/sample/sample-archive.json`.
 
-Sign-in needs an app registration in Microsoft Entra. Until `src/TodoExit.Web/wwwroot/appsettings.json` holds a real client ID, the page hides the sign-in button. The steps are in [docs/entra-app-registration.md](docs/entra-app-registration.md).
+Sign-in uses the app registration whose client ID is in `src/TodoExit.Web/wwwroot/appsettings.json`. Its redirect URIs must include the address you run the app at; see [docs/entra-app-registration.md](docs/entra-app-registration.md). Without a client ID the page hides the sign-in button.
 
 To build the static files for hosting:
 
@@ -164,7 +168,7 @@ To build the static files for hosting:
 dotnet publish src/TodoExit.Web -c Release -o ./artifacts/web
 ```
 
-The site is in `artifacts/web/wwwroot` and can be served by any static file host.
+The site is in `artifacts/web/wwwroot` and can be served by any static file host. The app works under a sub-path as long as `<base href>` in `index.html` names it. The GitHub Pages workflow (`.github/workflows/pages.yml`, started by hand) publishes it at https://milanm.github.io/todo-exit/ and does that rewrite.
 
 ## Project layout
 

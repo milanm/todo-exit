@@ -40,7 +40,7 @@
     </ul>
 </section>
 
-<section class="section">
+<section class="section" id="read-your-tasks">
     <h2>1. Read your tasks</h2>
 
     @if (!Settings.SignInConfigured)
@@ -61,11 +61,16 @@
             }
             else
             {
-                <button type="button" class="button" disabled="@Busy" @onclick="ReadFromGraphAsync">Read my tasks again</button>
+                <button type="button" class="button" disabled="@Busy" @onclick="ReadFromGraphAsync">@ReadButtonText</button>
             }
         }
         <button type="button" class="button secondary" disabled="@Busy" @onclick="LoadSampleAsync">Try with sample data</button>
     </div>
+
+    @if (_signedInHint && _state != State.Reading && !_hasRead)
+    {
+        <p class="status" role="status">You are signed in. Choose Read my tasks to start.</p>
+    }
 
     @if (_state == State.Reading)
     {
@@ -239,6 +244,12 @@
     private ReadProgress? _progress;
     private string? _error;
     private string? _userName;
+    private bool _hasRead;
+    private bool _signedInHint;
+    private bool _scrollToRead;
+
+    /// <summary>"Reading..." while reading, "Read my tasks" before the first read, then "Read my tasks again".</summary>
+    private string ReadButtonText => _state == State.Reading ? "Reading..." : _hasRead ? "Read my tasks again" : "Read my tasks";
     private string? _source;
     private CancellationTokenSource? _cts;
 
@@ -273,12 +284,24 @@
             if (state.User.Identity?.IsAuthenticated == true)
             {
                 _userName = state.User.FindFirst("preferred_username")?.Value ?? state.User.Identity.Name ?? "your Microsoft account";
-                await ReadFromGraphAsync();
+
+                // Do not start reading by itself: show where to continue instead.
+                _signedInHint = true;
+                _scrollToRead = true;
             }
         }
         catch (Exception ex) when (ex is JSException or InvalidOperationException)
         {
             _error = "Sign-in could not start: " + ex.Message;
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_scrollToRead)
+        {
+            _scrollToRead = false;
+            await JS.InvokeVoidAsync("todoExit.scrollIntoView", "read-your-tasks");
         }
     }
 
@@ -308,6 +331,7 @@
                 StateHasChanged();
             });
             var document = await reader.ReadAsync(progress, _cts.Token);
+            _hasRead = true;
             SetArchive(document, "Read from your Microsoft account just now.");
         }
         catch (GraphReadInterruptedException ex)
@@ -319,6 +343,7 @@
                 return;
             }
 
+            _hasRead = true;
             _state = _archive is null ? State.Idle : State.Ready;
             _partial = nothingRead ? null : ex.PartialArchive;
             _error = ex.WasCancelled ? "Reading was cancelled." : "Reading stopped: " + ex.Reason;

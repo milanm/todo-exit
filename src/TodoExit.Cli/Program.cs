@@ -1,5 +1,6 @@
 ﻿using System.Globalization;
 using System.Net.Http.Headers;
+using TodoExit.Cli.Auth;
 using TodoExit.Core;
 using TodoExit.Core.Archive;
 using TodoExit.Core.Export;
@@ -21,17 +22,21 @@ public static class Program
         todo-exit: export Microsoft To Do to files
 
         Usage:
-          todo-exit inventory (--token <t> | --token-file <path> | --from-archive <file>) [--timezone <IANA id>]
-                              [--verify-steps] [--resume <file>] [--out <dir>]
-          todo-exit export    (--token <t> | --token-file <path> | --from-archive <file>) --out <dir>
+          todo-exit inventory [--token <t> | --token-file <path> | --from-archive <file>] [--timezone <IANA id>]
+                              [--verify-steps] [--resume <file>] [--out <dir>] [--client-id <guid>] [--tenant <id>]
+          todo-exit export    [--token <t> | --token-file <path> | --from-archive <file>] --out <dir>
                               [--formats json,markdown,todoist,csv] [--include-completed] [--timezone <IANA id>]
-                              [--verify-steps] [--resume <file>]
+                              [--verify-steps] [--resume <file>] [--client-id <guid>] [--tenant <id>]
 
         Options:
-          --token <t>           Microsoft Graph access token with Tasks.Read. Can also come from TODOEXIT_TOKEN.
+          (no token)            Without --token, --token-file, TODOEXIT_TOKEN or --from-archive, the tool signs you in:
+                                it prints a web address and a code; open it, enter the code, sign in.
+          --client-id <guid>    Use your own app registration (also TODOEXIT_CLIENT_ID).
+          --tenant <id>         common (default), consumers, organizations, a tenant ID or a domain.
+          --token <t>           Advanced: a Microsoft Graph access token with Tasks.Read. Also TODOEXIT_TOKEN.
           --token-file <path>   Read the token from a file.
           --from-archive <file> Read a todo-exit archive.json (or archive.partial.json) instead of calling Microsoft Graph.
-          --resume <file>       Continue an interrupted read from archive.partial.json. Needs a token.
+          --resume <file>       Continue an interrupted read from archive.partial.json. Signs in again (or takes a token).
           --out <dir>           Output directory. For inventory, only used to save a partial archive.
           --formats <list>      Comma-separated: json, markdown, todoist, csv. Default: all four.
           --include-completed   Write completed tasks and checked steps to the Todoist CSV as open tasks.
@@ -57,9 +62,11 @@ public static class Program
     }
 
     /// <summary>The whole command. <paramref name="handler"/> replaces the network for tests.</summary>
+    /// <param name="authorityBase">Sign-in endpoint base for tests; default https://login.microsoftonline.com/.</param>
+    /// <param name="clock">Clock for token expiry; tests inject one.</param>
     internal static async Task<int> RunAsync(
         string[] args, TextWriter stdout, TextWriter stderr, HttpMessageHandler? handler, CancellationToken cancellationToken,
-        Func<TimeSpan, CancellationToken, Task>? delay = null)
+        Func<TimeSpan, CancellationToken, Task>? delay = null, string? authorityBase = null, Func<DateTimeOffset>? clock = null)
     {
         Options options;
         try
@@ -90,7 +97,12 @@ public static class Program
             TodoArchiveDocument document;
             try
             {
-                document = await LoadAsync(options, stderr, handler, delay, cancellationToken);
+                document = await LoadAsync(options, stderr, handler, delay, authorityBase, clock ?? (() => DateTimeOffset.UtcNow), cancellationToken);
+            }
+            catch (SignInException ex)
+            {
+                await stderr.WriteLineAsync($"error: {ex.Message}");
+                return ExitFailure;
             }
             catch (GraphReadInterruptedException ex)
             {
@@ -100,8 +112,9 @@ public static class Program
                 Directory.CreateDirectory(outDir);
                 var partialPath = Path.Combine(outDir, PartialArchiveFileName);
                 await File.WriteAllBytesAsync(partialPath, ex.PartialArchive.ToUtf8Bytes(), CancellationToken.None);
-                await stderr.WriteLineAsync(
-                    $"Saved what was read to {partialPath}. Get a new token and run the same command with --resume \"{partialPath}\".");
+                await stderr.WriteLineAsync(options.SignIn
+                    ? $"Saved what was read to {partialPath}. Run the same command with --resume \"{partialPath}\"; it will ask you to sign in again."
+                    : $"Saved what was read to {partialPath}. Get a new token and run the same command with --resume \"{partialPath}\".");
                 return ExitInterrupted;
             }
 
@@ -163,7 +176,7 @@ public static class Program
 
     private static async Task<TodoArchiveDocument> LoadAsync(
         Options options, TextWriter stderr, HttpMessageHandler? handler, Func<TimeSpan, CancellationToken, Task>? delay,
-        CancellationToken cancellationToken)
+        string? authorityBase, Func<DateTimeOffset> clock, CancellationToken cancellationToken)
     {
         if (options.ArchivePath is { } archivePath)
         {
@@ -176,10 +189,27 @@ public static class Program
             resume = await LoadFileAsync(resumePath, cancellationToken);
         }
 
-        var token = options.Token!;
-        using var http = handler is null ? new HttpClient() : new HttpClient(handler, disposeHandler: false);
+        HttpClient http;
+        if (options.SignIn)
+        {
+            // Device code sign-in. Tokens stay in memory; the handler adds them to Graph requests only.
+            var signInOptions = new SignInOptions(options.ClientId, options.Tenant, authorityBase ?? SignInOptions.DefaultAuthorityBase);
+            var authHttp = handler is null ? new HttpClient() : new HttpClient(handler, disposeHandler: false);
+            authHttp.Timeout = TimeSpan.FromMinutes(1);
+            var signIn = new DeviceCodeSignIn(authHttp, signInOptions, delay ?? Task.Delay, clock);
+            var tokens = await signIn.SignInAsync(message => stderr.WriteLine(message), cancellationToken);
+            await stderr.WriteLineAsync("Signed in.");
+            var authHandler = new GraphAuthHandler(tokens, signIn.RefreshAsync, clock) { InnerHandler = handler ?? new HttpClientHandler() };
+            http = new HttpClient(authHandler, disposeHandler: handler is null);
+        }
+        else
+        {
+            http = handler is null ? new HttpClient() : new HttpClient(handler, disposeHandler: false);
+            http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", options.Token!);
+        }
+
+        using var disposeHttp = http;
         http.Timeout = TimeSpan.FromMinutes(2);
-        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
         http.DefaultRequestHeaders.UserAgent.ParseAdd("todo-exit/0.1");
 
         var reader = new GraphTodoReader(http, delay) { VerifySteps = options.VerifySteps };
@@ -307,6 +337,13 @@ internal sealed class Options
 
     public bool VerifySteps { get; private set; }
 
+    /// <summary>No token was given: sign in with the device code flow.</summary>
+    public bool SignIn { get; private set; }
+
+    public string ClientId { get; private set; } = SignInOptions.DefaultClientId;
+
+    public string Tenant { get; private set; } = "common";
+
     /// <summary>Lines to print on stderr before running, e.g. for options that are no longer needed.</summary>
     public List<string> Notices { get; } = new();
 
@@ -334,7 +371,7 @@ internal sealed class Options
             throw new UsageException($"unknown command '{args[0]}'");
         }
 
-        string? token = null, tokenFile = null, archive = null, timezone = null, formats = null;
+        string? token = null, tokenFile = null, archive = null, timezone = null, formats = null, clientId = null, tenant = null;
         for (var i = 1; i < args.Length; i++)
         {
             var arg = args[i];
@@ -387,6 +424,12 @@ internal sealed class Options
 
                     o.VerifySteps = true;
                     break;
+                case "--client-id":
+                    clientId = Value();
+                    break;
+                case "--tenant":
+                    tenant = Value();
+                    break;
                 case "--resume":
                     o.ResumePath = Value();
                     break;
@@ -417,6 +460,27 @@ internal sealed class Options
             }
         }
 
+        clientId ??= Environment.GetEnvironmentVariable("TODOEXIT_CLIENT_ID") is { Length: > 0 } envClient ? envClient.Trim() : null;
+        if (clientId is not null)
+        {
+            if (!Guid.TryParse(clientId, out var parsedClient) || parsedClient == Guid.Empty)
+            {
+                throw new UsageException($"--client-id must be an application (client) ID, a GUID; got '{clientId}'");
+            }
+
+            o.ClientId = parsedClient.ToString();
+        }
+
+        if (tenant is not null)
+        {
+            if (tenant.Length == 0 || !tenant.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '.'))
+            {
+                throw new UsageException($"--tenant must be common, consumers, organizations, a tenant ID or a domain; got '{tenant}'");
+            }
+
+            o.Tenant = tenant;
+        }
+
         var sources = new[] { token, tokenFile, archive }.Count(s => s is not null);
         if (sources > 1)
         {
@@ -425,7 +489,7 @@ internal sealed class Options
 
         if (archive is not null && o.ResumePath is not null)
         {
-            throw new UsageException("--resume continues a read from Microsoft Graph and needs a token, not --from-archive");
+            throw new UsageException("--resume continues a read from Microsoft Graph and cannot be combined with --from-archive");
         }
 
         if (archive is not null)
@@ -453,10 +517,10 @@ internal sealed class Options
         }
         else
         {
-            throw new UsageException("give --token, --token-file or --from-archive (or set TODOEXIT_TOKEN)");
+            o.SignIn = true;
         }
 
-        if (o.ArchivePath is null && string.IsNullOrWhiteSpace(o.Token))
+        if (o.ArchivePath is null && !o.SignIn && string.IsNullOrWhiteSpace(o.Token))
         {
             throw new UsageException("the token is empty");
         }

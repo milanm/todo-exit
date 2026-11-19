@@ -17,7 +17,11 @@ internal sealed class FakeGraph : HttpMessageHandler
     private int _inFlightBatches;
     private int _inFlightAll;
 
-    public sealed record Request(string Method, string Url, JsonObject? Body);
+    public sealed record Request(string Method, string Url, JsonObject? Body)
+    {
+        /// <summary>The Authorization header as sent, if any.</summary>
+        public string? Authorization { get; init; }
+    }
 
     public sealed class FakeList(string id, string name)
     {
@@ -119,7 +123,7 @@ internal sealed class FakeGraph : HttpMessageHandler
 
     private async Task<HttpResponseMessage> HandleAsync(HttpRequestMessage request, string url, JsonObject? body, CancellationToken cancellationToken)
     {
-        var record = new Request(request.Method.Method, url, body);
+        var record = new Request(request.Method.Method, url, body) { Authorization = request.Headers.Authorization?.ToString() };
         int index;
         lock (_lock)
         {

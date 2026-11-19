@@ -81,10 +81,10 @@ public sealed class GraphRequestException : Exception
     /// <summary>The token is fine but not allowed to read this resource (401 or 403 with accessDenied and similar).</summary>
     public bool IsAccessDenied => IsAccessDeniedFor(StatusCode, GraphErrorCode);
 
-    internal static bool IsTokenProblemFor(HttpStatusCode? status, string? code) =>
+    public static bool IsTokenProblemFor(HttpStatusCode? status, string? code) =>
         status == HttpStatusCode.Unauthorized && !IsAccessDeniedFor(status, code);
 
-    internal static bool IsAccessDeniedFor(HttpStatusCode? status, string? code) =>
+    public static bool IsAccessDeniedFor(HttpStatusCode? status, string? code) =>
         status is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden
         && code is not null
         && (DeniedCodes.Contains(code, StringComparer.OrdinalIgnoreCase)

@@ -10,5 +10,11 @@ window.todoExit = {
     link.click();
     link.remove();
     setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
+  },
+  scrollIntoView: function (id) {
+    const element = document.getElementById(id);
+    if (element) {
+      element.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
   }
 };
