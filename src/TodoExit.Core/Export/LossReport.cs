@@ -244,6 +244,8 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
         static string N(int n) => n.ToString("N0", CultureInfo.InvariantCulture);
         static string Count(int n, string one, string many) => $"{N(n)} {(n == 1 ? one : many)}";
         var lines = new List<string>();
+        string? todoistLine = null;
+        string? splitLine = null;
 
         if (Formats.HasFlag(ExportFormats.Todoist))
         {
@@ -284,11 +286,20 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
 
             if (parts.Count > 0)
             {
-                lines.Add("Todoist CSV: " + string.Join(", ", parts) + ".");
+                todoistLine = "Todoist CSV: " + string.Join(", ", parts) + ".";
+            }
+
+            var split = todoist.Count(l => l.Kind == LossKinds.ListSplit);
+            if (split > 0)
+            {
+                splitLine = split == 1
+                    ? "1 list was split into parts; import each part into its own Todoist project."
+                    : $"{N(split)} lists were split into parts; import each part into its own Todoist project.";
             }
         }
 
         var read = new List<string>();
+        var rest = new List<string>();
         int Errors(string kind) => ReadNotes.Errors.Count(e => e.Kind == kind);
         if (Errors(ReadErrorKinds.TaskPartial) is var partial and > 0)
         {
@@ -320,15 +331,34 @@ public sealed record LossReport(Inventory Inventory, IReadOnlyList<Loss> Losses,
             var sentence = read.Count <= 2
                 ? string.Join(" and ", read)
                 : string.Join(", ", read.Take(read.Count - 1)) + " and " + read[^1];
-            lines.Add(char.ToUpperInvariant(sentence[0]) + sentence[1..] + ". Details in report.md.");
+            rest.Add(char.ToUpperInvariant(sentence[0]) + sentence[1..] + ". Details in report.md.");
         }
 
         if (ReadNotes.Interrupted)
         {
-            lines.Add("The archive is incomplete; run the read again with --resume to finish it.");
+            rest.Add("The archive is incomplete; run the read again with --resume to finish it.");
         }
 
-        return lines;
+        // At most three lines: the split hint gets its own line only when there is room.
+        if (todoistLine is not null && splitLine is not null && rest.Count >= 2)
+        {
+            lines.Add(todoistLine + " " + splitLine[0].ToString().ToUpperInvariant() + splitLine[1..]);
+        }
+        else
+        {
+            if (todoistLine is not null)
+            {
+                lines.Add(todoistLine);
+            }
+
+            if (splitLine is not null)
+            {
+                lines.Add(todoistLine is null && rest.Count >= 2 ? "Todoist CSV: " + splitLine : splitLine);
+            }
+        }
+
+        lines.AddRange(rest);
+        return lines.Take(3).ToList();
     }
 
     /// <summary>Name (or id) of the list the interrupted read was working on.</summary>

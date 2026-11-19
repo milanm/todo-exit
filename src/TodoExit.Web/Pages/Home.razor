@@ -193,6 +193,10 @@
             @foreach (var group in _report.Losses.GroupBy(l => l.Format))
             {
                 <h3>@FormatTitle(group.Key)</h3>
+                @if (group.Any(l => l.Kind == LossKinds.ListSplit))
+                {
+                    <p>Some lists have more than 300 tasks and were split into parts. A Todoist project holds at most 300 tasks, so import each part into its own project, for example named after the file.</p>
+                }
                 <table class="table counts">
                     <tbody>
                         @foreach (var kind in group.GroupBy(l => l.Kind).OrderByDescending(k => k.Sum(l => l.Count)))
@@ -454,6 +458,7 @@
         LossKinds.SharedListMembersNotCarried => "Shared lists (members not carried)",
         LossKinds.StartDateNotCarried => "Start dates not carried",
         LossKinds.StepOverflow => "Steps cut because of the 300-task limit",
+        LossKinds.ListSplit => "Files of split lists (import each into its own Todoist project)",
         _ => kind,
     };
 

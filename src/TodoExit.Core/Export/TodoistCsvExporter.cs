@@ -48,6 +48,15 @@ public static partial class TodoistCsvExporter
                 continue;
             }
 
+            if (parts.Count > 1)
+            {
+                // A Todoist project holds at most 300 tasks (403 MAX_ITEMS_LIMIT_REACHED otherwise), so each part
+                // needs its own project. Informational: nothing is lost.
+                losses.Add(new Loss(ExportFormatNames.Todoist, list.Name, null, LossKinds.ListSplit,
+                    $"This list has more than 300 tasks to import and was split into {parts.Count} files. Import each part into its own Todoist project.",
+                    parts.Count));
+            }
+
             for (var p = 0; p < parts.Count; p++)
             {
                 var path = parts.Count == 1

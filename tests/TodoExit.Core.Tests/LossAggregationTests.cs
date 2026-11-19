@@ -213,3 +213,70 @@ public class LossAggregationTests
         Assert.DoesNotContain("stepsForCompletedTasksSkipped", result.Files.Single(f => f.Path == "report.json").GetText());
     }
 }
+
+public class ListSplitTests
+{
+    private static (TodoArchiveDocument, TodoArchive) Lists(params (string Name, int Tasks)[] lists)
+    {
+        var doc = TestData.Document(lists
+            .Select(l => (TestData.List(l.Name), Enumerable.Range(0, l.Tasks).Select(i => TestData.Task($"{l.Name} {i}")).ToArray()))
+            .ToArray());
+        return (doc, ArchiveParser.Parse(doc, TimeZoneInfo.Utc));
+    }
+
+    [Fact]
+    public void Split_list_gets_one_list_split_entry_with_the_number_of_parts()
+    {
+        var (doc, archive) = Lists(("Big", 650), ("Small", 300));
+        var result = ExportService.Export(doc, archive, new ExportOptions(ExportFormats.Todoist));
+
+        Assert.Equal(3, result.Files.Count(f => f.Path.StartsWith("todoist/Big - part ", StringComparison.Ordinal)));
+        var split = Assert.Single(result.Report.Losses, l => l.Kind == LossKinds.ListSplit);
+        Assert.Equal(("todoist", "Big", null, 3, false), (split.Format, split.List, split.Task, split.Count, split.Aggregated));
+        Assert.Contains("Import each part into its own Todoist project.", split.Message);
+
+        var md = result.Report.ToMarkdown();
+        Assert.Contains("| list-split | 3 | This list has more than 300 tasks to import. Import each part into its own Todoist project. |", md);
+        var json = JsonNode.Parse(result.Files.Single(f => f.Path == "report.json").GetText())!;
+        var entry = json["losses"]!.AsArray().Single(l => (string)l!["kind"]! == "list-split")!;
+        Assert.Equal(3, (int)entry["count"]!);
+        Assert.Null(entry["task"]);
+    }
+
+    [Fact]
+    public void List_with_300_rows_or_fewer_gets_no_list_split_entry()
+    {
+        var (doc, archive) = Lists(("Exactly", 300), ("Few", 3));
+        var result = ExportService.Export(doc, archive, new ExportOptions());
+        Assert.DoesNotContain(result.Report.Losses, l => l.Kind == LossKinds.ListSplit);
+        Assert.DoesNotContain(result.Report.SummaryLines(), l => l.Contains("split", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Summary_mentions_split_lists_and_stays_within_three_lines()
+    {
+        var (doc, archive) = Lists(("Big", 650));
+        var report = ExportService.Export(doc, archive, new ExportOptions(ExportFormats.Todoist)).Report;
+        Assert.Equal(["1 list was split into parts; import each part into its own Todoist project."], report.SummaryLines());
+
+        var (doc2, archive2) = Lists(("A", 301), ("B", 400));
+        var report2 = ExportService.Export(doc2, archive2, new ExportOptions(ExportFormats.Todoist)).Report;
+        Assert.Equal(["2 lists were split into parts; import each part into its own Todoist project."], report2.SummaryLines());
+
+        // With a Todoist line, read problems and an incomplete archive, the hint is merged into the Todoist line.
+        var task = TestData.Task("Done", """{ "status": "completed" }""");
+        var doc3 = TestData.Document((TestData.List("Big"), Enumerable.Range(0, 301).Select(i => TestData.Task($"T{i}")).Append(task).ToArray()));
+        var notes = new ReadNotes([new ReadError(ReadErrorKinds.TaskPartial, "list-Big", "Big", "x", "X", 1, "partial")])
+        {
+            Interrupted = true,
+            InterruptedReason = "token expired",
+        };
+        var archive3 = ArchiveParser.Parse(doc3, TimeZoneInfo.Utc);
+        var result3 = ExportService.Export(doc3, archive3 with { ReadNotes = notes }, new ExportOptions(ExportFormats.Todoist));
+        var lines = result3.Report.SummaryLines();
+        Assert.Equal(3, lines.Count);
+        Assert.Equal("Todoist CSV: 1 completed task left out by design. 1 list was split into parts; import each part into its own Todoist project.", lines[0]);
+        Assert.StartsWith("1 task was only partly readable", lines[1]);
+        Assert.StartsWith("The archive is incomplete", lines[2]);
+    }
+}

@@ -8,8 +8,10 @@ namespace TodoExit.Core;
 /// A non-null caveat means the phrase only approximates the original rule; it goes into the loss report.
 /// </summary>
 /// <remarks>
-/// These phrases are based on Todoist's date syntax. They are untested against a real Todoist account
-/// or import. Keep every phrase in this class so they can be checked and fixed in one place.
+/// These phrases are based on Todoist's date syntax. They and the CSV template were checked against a live
+/// Todoist account on 2026-11-19: every phrase below (each with " starting yyyy-MM-dd", and the "ending" form)
+/// imported as a recurring task with the right next date. relativeYearly rules are still written as "every year"
+/// with a caveat. Keep every phrase in this class so they can be checked and fixed in one place.
 /// </remarks>
 public static class RecurrenceText
 {

@@ -68,6 +68,9 @@ public static class LossKinds
     public const string SharedListMembersNotCarried = "shared-list-members-not-carried";
     public const string StartDateNotCarried = "start-date-not-carried";
     public const string StepOverflow = "step-overflow";
+
+    /// <summary>Informational: the list had more than 300 task rows and was split into several CSV files.</summary>
+    public const string ListSplit = "list-split";
 }
 
 /// <summary>
@@ -106,6 +109,7 @@ public static class LossCatalog
         LossKinds.SharedListMembersNotCarried => "Sharing and members are not carried; share the Todoist project again.",
         LossKinds.StartDateNotCarried => "Todoist has no start date, so start dates are not carried.",
         LossKinds.StepOverflow => "A task had more steps than one Todoist import allows; the extra steps were not written.",
+        LossKinds.ListSplit => "This list has more than 300 tasks to import. Import each part into its own Todoist project.",
         ReadErrorKinds.TaskUnreadable => "Graph could not return the task at all; it is missing from every format.",
         ReadErrorKinds.TaskPartial => "Graph failed partway through the task; it is kept with the properties Graph sent.",
         ReadErrorKinds.StepsUnreadable => "The steps of the task could not be read.",

@@ -144,6 +144,10 @@ Read `report.md` first so you know which reminders and repeat rules to check aft
 
 Todoist cannot undo a CSV import. Try one small list first and check the result before you import the rest.
 
+A Todoist project holds at most 300 tasks. A list with more tasks is split into `<list> - part 1.csv`, `<list> - part 2.csv` and so on, and each part must be imported into its own project; name the projects after the files, for example "Work - part 1". The free Todoist plan allows 5 projects, so a large account may need a paid plan or fewer lists. `report.md` lists every split list.
+
+After import, Todoist turns plain web addresses in task names and descriptions into titled links. The address itself is unchanged; this is Todoist's behavior, not a bug in todo-exit.
+
 ## Run the web app locally
 
 ```
@@ -179,7 +183,7 @@ Known Graph behavior: task pages include `checklistItems` only on tasks that hav
 ## Roadmap
 
 - Phase 2: transfer tasks directly to Todoist through its API, including completed tasks and reminders where the API allows.
-- Check the repeat-rule phrases and the CSV template against a live Todoist import. The phrases in `RecurrenceText.cs` are based on Todoist's date syntax and are untested against a real account.
+- The repeat-rule phrases in `RecurrenceText.cs` and the CSV template were checked against a live Todoist account on 2026-11-19: three imported files (up to 294 tasks) came back with matching sub-tasks, priorities, labels, descriptions and dates, and every phrase imported as a recurring task with the right next date. Rules like "the last Sunday of October" (`relativeYearly`) are still written as `every year` with a note in the report.
 - A hosted version of the web app.
 
 ## Not affiliated
