@@ -60,6 +60,24 @@ public class RecurrenceTextTests
     }
 
     [Fact]
+    public void Weekly_interval_caveat_when_day_differs_from_due_date()
+    {
+        // 2026-11-27 is a Friday.
+        Assert.Equal(
+            ("every 2 weeks starting 2026-11-27",
+                (string?)"To Do repeats on wed every 2 weeks; Todoist will repeat on the due date's day (fri)"),
+            RecurrenceText.Describe(R("weekly", 2, [DayOfWeek.Wednesday]), new DateOnly(2026, 11, 27), new DateOnly(2026, 11, 27)));
+    }
+
+    [Fact]
+    public void Weekly_interval_no_caveat_when_day_matches_due_date()
+    {
+        // 2026-11-25 is a Wednesday.
+        Assert.Equal(("every 2 weeks", (string?)null),
+            RecurrenceText.Describe(R("weekly", 2, [DayOfWeek.Wednesday]), new DateOnly(2026, 11, 25)));
+    }
+
+    [Fact]
     public void Weekly_interval_with_several_days_names_lost_days()
     {
         var (text, caveat) = RecurrenceText.Describe(R("weekly", 2, [DayOfWeek.Thursday, DayOfWeek.Tuesday]));
