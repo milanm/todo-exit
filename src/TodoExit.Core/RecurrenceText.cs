@@ -70,7 +70,7 @@ public static class RecurrenceText
                 return (n == 1 ? "every day" : $"every {n} days", null);
 
             case "weekly":
-                return Weekly(r, n);
+                return Weekly(r, n, due);
 
             case "absolutemonthly":
             {
@@ -132,7 +132,7 @@ public static class RecurrenceText
         }
     }
 
-    private static (string Text, string? Caveat) Weekly(Recurrence r, int n)
+    private static (string Text, string? Caveat) Weekly(Recurrence r, int n, DateOnly? due)
     {
         var days = WeekOrder.Where(d => r.DaysOfWeek.Contains(d)).ToList();
         if (n == 1)
@@ -157,7 +157,13 @@ public static class RecurrenceText
 
         if (days.Count <= 1)
         {
-            return ($"every {n} weeks", null);
+            string? caveat = null;
+            if (days.Count == 1 && due is { } d && d.DayOfWeek != days[0])
+            {
+                caveat = $"To Do repeats on {Short(days[0])} every {n} weeks; Todoist will repeat on the due date's day ({Short(d.DayOfWeek)})";
+            }
+
+            return ($"every {n} weeks", caveat);
         }
 
         return ($"every {n} weeks",
